@@ -1,0 +1,30 @@
+# pledge.toml
+[database]
+url = "postgres://postgres:password@localhost:5432/pledge"
+
+[cache]
+global_ttl = 300
+
+[server]
+port = 3000
+https_port = 3001
+tls_cert_path = "certs/cert.pem"
+tls_key_path = "certs/key.pem"
+
+[[queries]]
+name = "get_user"
+sql = "SELECT id, name FROM users WHERE id = $1"
+ttl = 300
+
+[[queries]]
+name = "get_posts"
+sql = "SELECT * FROM posts WHERE user_id = $1"
+ttl = 600
+
+[[queries]]
+name = "insert_user"
+sql = "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id"
+
+[[queries]]
+name = "get_users_with_posts"
+sql = "SELECT u.id, u.name, p.id AS post_id, p.title FROM users u JOIN posts p ON u.id = p.user_id"
