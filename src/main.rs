@@ -3,8 +3,9 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, net::SocketAddr, path::PathBuf};
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -39,6 +40,22 @@ struct ServerConfig {
     tls_key_path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct QueryRequest {
+    sql: String,
+    params: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct QueryResponse {
+    rows: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+}
+
 #[tokio::main]
 async fn main() {
     let config = load_config().expect("Failed to load config");
@@ -64,46 +81,104 @@ fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
 }
 
 fn create_router() -> Router {
-    return Router::new()
+    Router::new()
         .route("/", get(|| async { "Hello, World!" }))
-        .route("/healthcheck", get("OK"))
-        .route("/sql", post(sql_handler));
+        .route("/health", get(health_handler))
+        .route("/query", post(query_handler))
 }
 
 async fn run_server(server_config: &ServerConfig) {
     let routes = create_router();
-    let port = &server_config.https_port.unwrap_or(server_config.port);
-    let tls_cert_path = match &server_config.tls_cert_path {
-        Some(cert) => cert,
-        None => panic!("TLS certificate not provided"),
+    let cloned_routes = routes.clone();
+    let port = server_config.port;
+
+    let http_handle = tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(listener) => {
+                println!("Server listening on HTTP on port {}", port);
+                listener
+            }
+            Err(err) => {
+                eprintln!("Failed to bind to port {}: {}", port, err);
+                return;
+            }
+        };
+
+        match axum::serve(listener, routes).await {
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("Failed to serve HTTP server: {}", err);
+            }
+        };
+    });
+
+    let https_handle: Option<JoinHandle<()>> = if let (Some(https_port), Some(cert), Some(key)) = (
+        server_config.https_port,
+        server_config.tls_cert_path.clone(),
+        server_config.tls_key_path.clone(),
+    ) && https_port != port
+    {
+        Some(tokio::spawn(async move {
+            let config =
+                match RustlsConfig::from_pem_file(PathBuf::from(cert), PathBuf::from(key)).await {
+                    Ok(config) => {
+                        println!("Server listening on HTTPS on port {}", https_port);
+                        config
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to load TLS certificate and key: {}", err);
+                        return;
+                    }
+                };
+
+            let addr = SocketAddr::from(([0, 0, 0, 0], https_port));
+            match axum_server::bind_rustls(addr, config)
+                .serve(cloned_routes.into_make_service())
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => eprintln!("Failed to start HTTPS server: {}", err),
+            };
+        }))
+    } else {
+        None
     };
-    let tls_key_path = match &server_config.tls_key_path {
-        Some(key) => key,
-        None => panic!("TLS key not provided"),
-    };
-    println!("TLS key: {}", tls_key_path);
-    println!("TLS certificate: {}", tls_cert_path);
 
-    let config =
-        RustlsConfig::from_pem_file(PathBuf::from(tls_cert_path), PathBuf::from(tls_key_path))
-            .await
-            .unwrap();
-
-    // let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-    //     .await
-    //     .unwrap();
-    // axum::serve(listener, routes).await.unwrap();
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], port.clone()));
-    axum_server::bind_rustls(addr, config)
-        .serve(routes.into_make_service())
-        .await
-        .unwrap();
-    println!("Server running on port: {}", port);
+    match https_handle {
+        Some(https_handle) => {
+            let (http, https) = tokio::join!(http_handle, https_handle);
+            match http {
+                Ok(_) => {}
+                Err(err) => eprintln!("{}", err),
+            };
+            match https {
+                Ok(_) => {}
+                Err(err) => eprintln!("{}", err),
+            };
+        }
+        None => {
+            let _ = http_handle.await;
+        }
+    }
 }
 
-async fn sql_handler(Json(body): Json<serde_json::Value>) -> String {
-    println!("Received body parameters: {:?}", body);
-    let return_value = format!("Body handled successfully {:?}", body);
-    return_value
+async fn health_handler() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "OK".to_string(),
+    })
+}
+
+async fn query_handler(Json(body): Json<QueryRequest>) -> Json<QueryResponse> {
+    println!("Received query: {:}", body.sql);
+    println!("Params: {:?}", body.params);
+
+    let fake_row = serde_json::json!({
+        "id": body.params.get(0).unwrap_or(&serde_json::json!(1)),
+        "name": "Magnus",
+        "email": "example@mail.com"
+    });
+
+    Json(QueryResponse {
+        rows: vec![fake_row],
+    })
 }
