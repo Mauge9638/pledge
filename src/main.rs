@@ -4,7 +4,8 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
-use std::{fs, net::SocketAddr, path::PathBuf};
+use sqlx::{Column, PgPool, Row, TypeInfo, postgres::PgPoolOptions};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +72,20 @@ async fn main() {
             name, sql, ttl
         );
     }
-    run_server(&config.server).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&config.database.url)
+        .await
+        .expect("Failed to connect to database");
+
+    let pool = Arc::new(pool);
+
+    println!(
+        "Connected to the database!, with current connections: {}",
+        pool.size()
+    );
+
+    run_server(&config.server, pool).await;
 }
 
 fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -80,15 +94,16 @@ fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-fn create_router() -> Router {
+fn create_router(pool: Arc<PgPool>) -> Router {
     Router::new()
         .route("/", get(|| async { "Hello, World!" }))
         .route("/health", get(health_handler))
         .route("/query", post(query_handler))
+        .with_state(pool)
 }
 
-async fn run_server(server_config: &ServerConfig) {
-    let routes = create_router();
+async fn run_server(server_config: &ServerConfig, pool: Arc<PgPool>) {
+    let routes = create_router(pool);
     let cloned_routes = routes.clone();
     let port = server_config.port;
 
@@ -168,17 +183,80 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
-async fn query_handler(Json(body): Json<QueryRequest>) -> Json<QueryResponse> {
+async fn query_handler(
+    axum::extract::State(pool): axum::extract::State<Arc<PgPool>>,
+    Json(body): Json<QueryRequest>,
+) -> Result<Json<QueryResponse>, (axum::http::StatusCode, String)> {
     println!("Received query: {:}", body.sql);
     println!("Params: {:?}", body.params);
 
-    let fake_row = serde_json::json!({
-        "id": body.params.get(0).unwrap_or(&serde_json::json!(1)),
-        "name": "Magnus",
-        "email": "example@mail.com"
-    });
+    // let fake_row = serde_json::json!({
+    //     "id": body.params.get(0).unwrap_or(&serde_json::json!(1)),
+    //     "name": "Magnus",
+    //     "email": "example@mail.com"
+    // });
 
-    Json(QueryResponse {
-        rows: vec![fake_row],
-    })
+    let mut query = sqlx::query(&body.sql);
+
+    for param in &body.params {
+        // Bind each parameter
+        if let Some(num) = param.as_i64() {
+            query = query.bind(num);
+        } else if let Some(text) = param.as_str() {
+            query = query.bind(text);
+        }
+        // Add more types as needed
+    }
+
+    let rows = query
+        .fetch_all(pool.as_ref())
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let rows_to_return: Vec<serde_json::Map<String, serde_json::Value>> = rows
+        .into_iter()
+        .map(|row| {
+            let mut row_map = serde_json::Map::new();
+            for (i, column) in row.columns().iter().enumerate() {
+                let value = match column.type_info().name() {
+                    "INT4" => {
+                        let val: i32 = row.get(i);
+                        serde_json::Value::Number(val.into())
+                    }
+                    "INT8" => {
+                        let val: i64 = row.get(i);
+                        serde_json::Value::Number(val.into())
+                    }
+                    "TEXT" | "VARCHAR" => {
+                        let val: String = row.get(i);
+                        serde_json::Value::String(val.into())
+                    }
+                    "BOOL" => {
+                        let val: bool = row.get(i);
+                        serde_json::Value::Bool(val.into())
+                    }
+                    // "FLOAT4" => {
+                    //     let val: f32 = row.get(i);
+                    //     serde_json::Value::Number(val.into())
+                    // }
+                    // "FLOAT8" => {
+                    //     let val: f64 = row.get(i);
+                    //     serde_json::Value::Number(val.into())
+                    // }
+                    _ => serde_json::Value::Null,
+                };
+                row_map.insert(column.name().to_string(), value);
+            }
+            row_map
+        })
+        .collect();
+
+    // let result = serde_json::json!({
+    //     "status": "OK",
+    //     "data": rowsToReturn
+    // });
+
+    Ok(Json(QueryResponse {
+        rows: vec![serde_json::json!(rows_to_return)],
+    }))
 }

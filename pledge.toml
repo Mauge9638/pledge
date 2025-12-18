@@ -17,6 +17,11 @@ sql = "SELECT id, name FROM users WHERE id = $1"
 ttl = 300
 
 [[queries]]
+name = "get_users_where_email_under_5000_and_over_4800"
+sql = "SELECT id, name FROM users WHERE id < 5000 AND id > 4800"
+ttl = 300
+
+[[queries]]
 name = "get_posts"
 sql = "SELECT * FROM posts WHERE user_id = $1"
 ttl = 600
