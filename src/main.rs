@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, PgPool, Row, TypeInfo, postgres::PgPoolOptions};
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -218,31 +219,81 @@ async fn query_handler(
         .map(|row| {
             let mut row_map = serde_json::Map::new();
             for (i, column) in row.columns().iter().enumerate() {
+                println!(
+                    "Column: {}, Type: {}",
+                    column.name(),
+                    column.type_info().name()
+                );
+                // Types are taken from here: https://docs.rs/sqlx/latest/sqlx/postgres/types/index.html
                 let value = match column.type_info().name() {
-                    "INT4" => {
+                    "BOOL" => {
+                        let val: bool = row.get(i);
+                        serde_json::Value::Bool(val)
+                    }
+                    "“CHAR”" => {
+                        let val: i8 = row.get(i);
+                        serde_json::Value::Number(val.into())
+                    }
+                    "SMALLINT" | "SMALLSERIAL" | "INT2" => {
+                        let val: i16 = row.get(i);
+                        serde_json::Value::Number(val.into())
+                    }
+                    "INT" | "SERIAL" | "INT4" => {
                         let val: i32 = row.get(i);
                         serde_json::Value::Number(val.into())
                     }
-                    "INT8" => {
+                    "INT8" | "BIGSERIAL" | "BIGINT" => {
                         let val: i64 = row.get(i);
                         serde_json::Value::Number(val.into())
                     }
-                    "TEXT" | "VARCHAR" => {
+                    "REAL" | "FLOAT4" => {
+                        let val: f32 = row.get(i);
+                        let val_as_f64_option = serde_json::Number::from_f64(val.into());
+
+                        match val_as_f64_option {
+                            Some(val) => serde_json::Value::Number(val),
+                            None => serde_json::Value::Null,
+                        }
+                    }
+                    "DOUBLE PRECISION" | "FLOAT8" => {
+                        let val: f64 = row.get(i);
+                        let val_as_f64_option = serde_json::Number::from_f64(val);
+
+                        match val_as_f64_option {
+                            Some(val) => serde_json::Value::Number(val),
+                            None => serde_json::Value::Null,
+                        }
+                    }
+                    "VARCHAR" | "CHAR(N)" | "TEXT" | "NAME" | "CITEXT" => {
                         let val: String = row.get(i);
-                        serde_json::Value::String(val.into())
+                        serde_json::Value::String(val)
                     }
-                    "BOOL" => {
-                        let val: bool = row.get(i);
-                        serde_json::Value::Bool(val.into())
+                    "BYTEA" => {
+                        let val: Vec<u8> = row.get(i);
+                        serde_json::Value::String(general_purpose::STANDARD.encode(val))
                     }
-                    // "FLOAT4" => {
-                    //     let val: f32 = row.get(i);
-                    //     serde_json::Value::Number(val.into())
-                    // }
-                    // "FLOAT8" => {
-                    //     let val: f64 = row.get(i);
-                    //     serde_json::Value::Number(val.into())
-                    // }
+                    "VOID" => serde_json::Value::Null,
+
+                    "TIMESTAMP" => {
+                        let val: time::PrimitiveDateTime = row.get(i);
+                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
+                    }
+                    "TIMESTAMPTZ" => {
+                        let val: time::OffsetDateTime = row.get(i);
+                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
+                    }
+                    "DATE" => {
+                        let val: time::Date = row.get(i);
+                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
+                    }
+                    "TIME" => {
+                        let val: time::Time = row.get(i);
+                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
+                    }
+                    "NUMERIC" => {
+                        let val: rust_decimal::Decimal = row.get(i);
+                        serde_json::Value::String(val.to_string())
+                    }
                     _ => serde_json::Value::Null,
                 };
                 row_map.insert(column.name().to_string(), value);
@@ -250,11 +301,6 @@ async fn query_handler(
             row_map
         })
         .collect();
-
-    // let result = serde_json::json!({
-    //     "status": "OK",
-    //     "data": rowsToReturn
-    // });
 
     Ok(Json(QueryResponse {
         rows: vec![serde_json::json!(rows_to_return)],
