@@ -294,6 +294,10 @@ async fn query_handler(
                         let val: rust_decimal::Decimal = row.get(i);
                         serde_json::Value::String(val.to_string())
                     }
+                    "UUID" => {
+                        let val: uuid::Uuid = row.get(i);
+                        serde_json::Value::String(val.to_string())
+                    }
                     _ => serde_json::Value::Null,
                 };
                 row_map.insert(column.name().to_string(), value);
