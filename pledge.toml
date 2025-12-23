@@ -17,8 +17,8 @@ sql = "SELECT id, name FROM users WHERE id = $1"
 ttl = 300
 
 [[queries]]
-name = "get_users_where_email_under_5000_and_over_4800"
-sql = "SELECT id, name FROM users WHERE id < 5000 AND id > 4800"
+name = "get_users_where_email_like_x_or_y"
+sql = "SELECT * FROM users where email like $1 or email like $2;"
 ttl = 300
 
 [[queries]]

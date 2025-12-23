@@ -5,8 +5,11 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
-use sqlx::{Column, PgPool, Row, TypeInfo, postgres::PgPoolOptions};
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
+use sqlx::{
+    Column, PgPool, Row, TypeInfo,
+    postgres::{PgColumn, PgPoolOptions, PgRow},
+};
+use std::{collections::HashMap, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Deserialize)]
@@ -22,7 +25,7 @@ struct DatabaseConfig {
     url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct QueryTemplate {
     name: String,
     sql: String,
@@ -58,6 +61,30 @@ struct HealthResponse {
     status: String,
 }
 
+struct QueryMatcher {
+    templates: HashMap<String, QueryTemplate>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    pool: Arc<PgPool>,
+    matcher: Arc<QueryMatcher>,
+}
+
+impl QueryMatcher {
+    fn new(config: &Config) -> Self {
+        let mut templates = HashMap::new();
+        for query in &config.queries {
+            templates.insert(query.sql.clone(), query.clone());
+        }
+        QueryMatcher { templates }
+    }
+
+    fn find_template(&self, sql: &str) -> Option<&QueryTemplate> {
+        self.templates.get(sql)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config = load_config().expect("Failed to load config");
@@ -81,12 +108,19 @@ async fn main() {
 
     let pool = Arc::new(pool);
 
-    println!(
-        "Connected to the database!, with current connections: {}",
-        pool.size()
-    );
+    let matcher = QueryMatcher::new(&config);
 
-    run_server(&config.server, pool).await;
+    let state = AppState {
+        pool: pool,
+        matcher: Arc::new(matcher),
+    };
+
+    // println!(
+    //     "Connected to the database!, with current connections: {}",
+    //     pool.size()
+    // );
+
+    run_server(&config.server, state).await;
 }
 
 fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -95,16 +129,16 @@ fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-fn create_router(pool: Arc<PgPool>) -> Router {
+fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| async { "Hello, World!" }))
         .route("/health", get(health_handler))
         .route("/query", post(query_handler))
-        .with_state(pool)
+        .with_state(state)
 }
 
-async fn run_server(server_config: &ServerConfig, pool: Arc<PgPool>) {
-    let routes = create_router(pool);
+async fn run_server(server_config: &ServerConfig, state: AppState) {
+    let routes = create_router(state);
     let cloned_routes = routes.clone();
     let port = server_config.port;
 
@@ -185,19 +219,18 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 async fn query_handler(
-    axum::extract::State(pool): axum::extract::State<Arc<PgPool>>,
+    axum::extract::State(state): axum::extract::State<AppState>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (axum::http::StatusCode, String)> {
     println!("Received query: {:}", body.sql);
     println!("Params: {:?}", body.params);
 
-    // let fake_row = serde_json::json!({
-    //     "id": body.params.get(0).unwrap_or(&serde_json::json!(1)),
-    //     "name": "Magnus",
-    //     "email": "example@mail.com"
-    // });
-
     let mut query = sqlx::query(&body.sql);
+
+    match state.matcher.find_template(&body.sql) {
+        Some(template) => println!("✓ Matched template: {}", template.name),
+        None => println!("✗ Query not predefined: {}", body.sql),
+    };
 
     for param in &body.params {
         // Bind each parameter
@@ -205,108 +238,118 @@ async fn query_handler(
             query = query.bind(num);
         } else if let Some(text) = param.as_str() {
             query = query.bind(text);
+        } else if let Some(bool) = param.as_bool() {
+            query = query.bind(bool);
+        } else if let Some(array) = param.as_array() {
+            query = query.bind(array);
+        } else if let Some(num) = param.as_f64() {
+            query = query.bind(num);
+        } else {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Unsupported parameter type".to_string(),
+            ));
         }
-        // Add more types as needed
     }
 
     let rows = query
-        .fetch_all(pool.as_ref())
+        .fetch_all(state.pool.as_ref())
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let rows_to_return: Vec<serde_json::Map<String, serde_json::Value>> = rows
+    let rows_to_return: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|row| {
             let mut row_map = serde_json::Map::new();
             for (i, column) in row.columns().iter().enumerate() {
-                println!(
-                    "Column: {}, Type: {}",
-                    column.name(),
-                    column.type_info().name()
-                );
-                // Types are taken from here: https://docs.rs/sqlx/latest/sqlx/postgres/types/index.html
-                let value = match column.type_info().name() {
-                    "BOOL" => {
-                        let val: bool = row.get(i);
-                        serde_json::Value::Bool(val)
-                    }
-                    "“CHAR”" => {
-                        let val: i8 = row.get(i);
-                        serde_json::Value::Number(val.into())
-                    }
-                    "SMALLINT" | "SMALLSERIAL" | "INT2" => {
-                        let val: i16 = row.get(i);
-                        serde_json::Value::Number(val.into())
-                    }
-                    "INT" | "SERIAL" | "INT4" => {
-                        let val: i32 = row.get(i);
-                        serde_json::Value::Number(val.into())
-                    }
-                    "INT8" | "BIGSERIAL" | "BIGINT" => {
-                        let val: i64 = row.get(i);
-                        serde_json::Value::Number(val.into())
-                    }
-                    "REAL" | "FLOAT4" => {
-                        let val: f32 = row.get(i);
-                        let val_as_f64_option = serde_json::Number::from_f64(val.into());
+                let value = convert_row_val_to_serde(&row, column, i);
 
-                        match val_as_f64_option {
-                            Some(val) => serde_json::Value::Number(val),
-                            None => serde_json::Value::Null,
-                        }
-                    }
-                    "DOUBLE PRECISION" | "FLOAT8" => {
-                        let val: f64 = row.get(i);
-                        let val_as_f64_option = serde_json::Number::from_f64(val);
-
-                        match val_as_f64_option {
-                            Some(val) => serde_json::Value::Number(val),
-                            None => serde_json::Value::Null,
-                        }
-                    }
-                    "VARCHAR" | "CHAR(N)" | "TEXT" | "NAME" | "CITEXT" => {
-                        let val: String = row.get(i);
-                        serde_json::Value::String(val)
-                    }
-                    "BYTEA" => {
-                        let val: Vec<u8> = row.get(i);
-                        serde_json::Value::String(general_purpose::STANDARD.encode(val))
-                    }
-                    "VOID" => serde_json::Value::Null,
-
-                    "TIMESTAMP" => {
-                        let val: time::PrimitiveDateTime = row.get(i);
-                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
-                    }
-                    "TIMESTAMPTZ" => {
-                        let val: time::OffsetDateTime = row.get(i);
-                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
-                    }
-                    "DATE" => {
-                        let val: time::Date = row.get(i);
-                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
-                    }
-                    "TIME" => {
-                        let val: time::Time = row.get(i);
-                        serde_json::to_value(val).unwrap_or(serde_json::Value::Null)
-                    }
-                    "NUMERIC" => {
-                        let val: rust_decimal::Decimal = row.get(i);
-                        serde_json::Value::String(val.to_string())
-                    }
-                    "UUID" => {
-                        let val: uuid::Uuid = row.get(i);
-                        serde_json::Value::String(val.to_string())
-                    }
-                    _ => serde_json::Value::Null,
-                };
                 row_map.insert(column.name().to_string(), value);
             }
-            row_map
+            serde_json::Value::Object(row_map)
         })
         .collect();
 
     Ok(Json(QueryResponse {
-        rows: vec![serde_json::json!(rows_to_return)],
+        rows: rows_to_return,
     }))
+}
+
+fn convert_row_val_to_serde(row_val: &PgRow, column: &PgColumn, index: usize) -> serde_json::Value {
+    // Types are taken from here: https://docs.rs/sqlx/latest/sqlx/postgres/types/index.html
+    return match column.type_info().name() {
+        "BOOL" => {
+            let val: bool = row_val.get(index);
+            serde_json::Value::Bool(val)
+        }
+        "“CHAR”" => {
+            let val: i8 = row_val.get(index);
+            serde_json::Value::Number(val.into())
+        }
+        "SMALLINT" | "SMALLSERIAL" | "INT2" => {
+            let val: i16 = row_val.get(index);
+            serde_json::Value::Number(val.into())
+        }
+        "INT" | "SERIAL" | "INT4" => {
+            let val: i32 = row_val.get(index);
+            serde_json::Value::Number(val.into())
+        }
+        "INT8" | "BIGSERIAL" | "BIGINT" => {
+            let val: i64 = row_val.get(index);
+            serde_json::Value::Number(val.into())
+        }
+        "REAL" | "FLOAT4" => {
+            let val: f32 = row_val.get(index);
+            let val_as_f64_option = serde_json::Number::from_f64(val.into());
+
+            match val_as_f64_option {
+                Some(val) => serde_json::Value::Number(val),
+                None => serde_json::Value::Null,
+            }
+        }
+        "DOUBLE PRECISION" | "FLOAT8" => {
+            let val: f64 = row_val.get(index);
+            let val_as_f64_option = serde_json::Number::from_f64(val);
+
+            match val_as_f64_option {
+                Some(val) => serde_json::Value::Number(val),
+                None => serde_json::Value::Null,
+            }
+        }
+        "VARCHAR" | "CHAR(N)" | "TEXT" | "NAME" | "CITEXT" => {
+            let val: String = row_val.get(index);
+            serde_json::Value::String(val)
+        }
+        "BYTEA" => {
+            let val: Vec<u8> = row_val.get(index);
+            serde_json::Value::String(general_purpose::STANDARD.encode(val))
+        }
+        "VOID" => serde_json::Value::Null,
+
+        "TIMESTAMP" => {
+            let val: time::PrimitiveDateTime = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        "TIMESTAMPTZ" => {
+            let val: time::OffsetDateTime = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        "DATE" => {
+            let val: time::Date = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        "TIME" => {
+            let val: time::Time = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        "NUMERIC" => {
+            let val: rust_decimal::Decimal = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        "UUID" => {
+            let val: uuid::Uuid = row_val.get(index);
+            serde_json::Value::String(val.to_string())
+        }
+        _ => serde_json::Value::Null,
+    };
 }
