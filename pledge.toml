@@ -18,7 +18,7 @@ ttl = 300
 
 [[queries]]
 name = "get_users_where_email_like_x_or_y"
-sql = "SELECT * FROM users where email like $1 or email like $2;"
+sql = "SELECT * FROM users where email like $1 or email like $2"
 ttl = 300
 
 [[queries]]
