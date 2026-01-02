@@ -49,8 +49,7 @@ sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_matc
 
 ## Preliminary benchmarking
 
-Query search_users_by_content
-Body: 
+Query search_users_by_content:
 ```json 
 {
    "sql": "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_match FROM users u JOIN posts p ON u.id = p.user_id WHERE p.content ILIKE $1 OR p.content ILIKE $2 OR p.title ILIKE $3 GROUP BY u.email ORDER BY match_count DESC LIMIT 20",
