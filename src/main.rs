@@ -20,7 +20,12 @@ async fn main() {
             .expect("Failed to connect to database"),
     );
     let matcher = Arc::new(QueryMatcher::new(&config));
-    let state = AppState { pool, matcher };
+    let cache = Arc::new(moka::sync::Cache::new(100));
+    let state = AppState {
+        pool,
+        matcher,
+        cache,
+    };
 
     server::run_server(&config.server, state).await;
 }

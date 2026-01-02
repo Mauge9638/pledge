@@ -7,4 +7,5 @@ use sqlx::PgPool;
 pub struct AppState {
     pub pool: Arc<PgPool>,
     pub matcher: Arc<QueryMatcher>,
+    pub cache: Arc<moka::sync::Cache<String, Vec<u8>>>,
 }

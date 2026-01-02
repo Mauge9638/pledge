@@ -18,4 +18,8 @@ impl QueryMatcher {
     pub fn find_template(&self, sql: &str) -> Option<&super::QueryTemplate> {
         self.templates.get(sql)
     }
+
+    pub fn template_exists(&self, sql: &str) -> bool {
+        self.templates.contains_key(sql)
+    }
 }

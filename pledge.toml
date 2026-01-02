@@ -33,3 +33,11 @@ sql = "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id"
 [[queries]]
 name = "get_users_with_posts"
 sql = "SELECT u.id, u.name, p.id AS post_id, p.title FROM users u JOIN posts p ON u.id = p.user_id"
+
+[[queries]]
+name = "cross_join_users"
+sql = "SELECT u1.email, u2.email, u1.id + u2.id as combined_id FROM users u1 CROSS JOIN users u2 WHERE u1.id < $1 AND u2.id < $2"
+
+[[queries]]
+name = "search_users_by_content"
+sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_match FROM users u JOIN posts p ON u.id = p.user_id WHERE p.content ILIKE $1 OR p.content ILIKE $2 OR p.title ILIKE $3 GROUP BY u.email ORDER BY match_count DESC LIMIT 20"
