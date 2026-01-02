@@ -1,10 +1,12 @@
 # Pledge 
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 ## **THIS IS A WORK IN PROGRESS, AND NOT READY FOR PRODUCTION USE**
 
 Make your Postgres queries 100x faster
 
-Pledge is a caching layer for Postgres that aims to improve query performance by caching frequently used queries. 
+Pledge is a **free and open-source** caching layer for Postgres that aims to improve query performance by caching frequently used queries. 
 The queries that should be cached are defined in the `pledge.toml` file. With the support for dynamic queries with placeholders, Pledge can cache queries with different parameters, or just queries with predefined parameters.
 
 Pledge is also meant to be used as a pass-through layer for Postgres, allowing you to use it as a caching layer for your Postgres database.
@@ -77,3 +79,9 @@ As of right now, pledge supports the following Postgres data types:
 11. NUMERIC
 12. TIMESTAMP, TIMESTAMPTZ, DATE, TIME
 13. UUID
+
+## License
+
+  Pledge is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full license text.
+
+  Copyright 2026 Magnus Stuart Juul
