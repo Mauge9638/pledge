@@ -66,9 +66,11 @@ pub async fn query_handler(
         serialized.len() as f64 / 1_000_000.0
     );
 
-    let cache_insert_start = Instant::now();
-    state.cache.insert(key, serialized.clone());
-    println!("Cache insert time: {:?}", cache_insert_start.elapsed());
+    if template_match {
+        let cache_insert_start = Instant::now();
+        state.cache.insert(key, serialized.clone());
+        println!("Cache insert time: {:?}", cache_insert_start.elapsed());
+    }
 
     println!("Total handler time: {:?}", handler_start.elapsed());
 
