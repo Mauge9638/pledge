@@ -25,6 +25,28 @@ graph LR
     style D fill:#336791
 ```
 
+## How It Works
+
+Send all SQL queries to Pledge via HTTP:
+
+```bash
+# Reads (cached):
+POST /query {"sql": "SELECT ...", "params": [...]}
+
+# Writes (executed, cache not invalidated):
+POST /query {"sql": "UPDATE ...", "params": [...]}
+```
+Cache Invalidation:
+- Currently: Time-based (TTL)
+- Each query can have custom TTL
+- Writes do not auto-invalidate cache
+- Future: Automatic invalidation (v0.?+)
+
+When to Use:
+- ✅ Data that changes infrequently (products, configs)
+- ✅ Acceptable eventual consistency (dashboards, analytics)
+- ⚠️ Not recommended: Financial balances, inventory counts (use short TTL if needed)
+
 ## Config
 
 ```toml
