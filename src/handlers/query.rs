@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::server::state::AppState;
 use crate::{cache::store::cache_key, database::conversion};
@@ -27,25 +27,33 @@ pub async fn query_handler(
     println!("Received query: {:}", body.sql);
     println!("Params: {:?}", body.params);
 
-    let template_match = state.matcher.template_exists(&body.sql);
+    let matched_template = state.matcher.find_template(&body.sql);
+    // let template_match = state.matcher.template_exists(&body.sql);
     let key = cache_key(&body.sql, &body.params);
 
-    if template_match {
-        if let Some(cached_result) = state.cache.get(&key) {
-            let cache_get_time = handler_start.elapsed();
-            println!("Cache hit - get time: {:?}", cache_get_time);
+    if matched_template.is_some() {
+        if let Some((cached_result, expiry)) = state.cache.get(&key) {
+            if Instant::now() < expiry {
+                let cache_get_time = handler_start.elapsed();
+                println!("Cache hit - get time: {:?}", cache_get_time);
 
-            let copy_start = Instant::now();
-            let bytes = cached_result.to_vec();
-            println!("Copy time: {:?}", copy_start.elapsed());
+                let copy_start = Instant::now();
+                let bytes = cached_result.to_vec();
+                println!("Copy time: {:?}", copy_start.elapsed());
 
-            let response = Response::builder()
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(bytes.into())
-                .unwrap();
+                let response = Response::builder()
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(bytes.into())
+                    .unwrap();
 
-            println!("Total cache hit time: {:?}", handler_start.elapsed());
-            return Ok(response);
+                println!("Total cache hit time: {:?}", handler_start.elapsed());
+                return Ok(response);
+            } else {
+                println!(
+                    "Cache expired per entry level TTL, invalidating and retrieving new value"
+                );
+                state.cache.invalidate(&key);
+            }
         }
     }
 
@@ -66,10 +74,18 @@ pub async fn query_handler(
         serialized.len() as f64 / 1_000_000.0
     );
 
-    if template_match {
-        let cache_insert_start = Instant::now();
-        state.cache.insert(key, serialized.clone());
-        println!("Cache insert time: {:?}", cache_insert_start.elapsed());
+    match matched_template {
+        Some(template) => {
+            let cache_insert_start = Instant::now();
+            let expiration = match template.ttl {
+                Some(ttl) => Instant::now() + Duration::from_secs(ttl),
+                None => Instant::now() + Duration::from_secs(state.global_ttl),
+            };
+
+            state.cache.insert(key, (serialized.clone(), expiration));
+            println!("Cache insert time: {:?}", cache_insert_start.elapsed());
+        }
+        None => {}
     }
 
     println!("Total handler time: {:?}", handler_start.elapsed());

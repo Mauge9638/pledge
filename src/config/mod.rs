@@ -19,6 +19,7 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize)]
 pub struct CacheConfig {
     pub global_ttl: u64,
+    pub max_size_mb: u64,
 }
 
 #[derive(Debug, Deserialize)]
