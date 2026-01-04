@@ -33,26 +33,21 @@ async fn main() {
         .unwrap_or(config.cache.global_ttl)
         .max(config.cache.global_ttl);
 
-    let cache = match config.cache.max_size_mb {
-        Some(size) => {
-            Arc::new(
-                CacheBuilder::new(size * 1024 * 1024)
-                    .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
-                        value.0.len() as u32 // Weight by data size
-                    })
-                    .time_to_live(Duration::from_secs(max_ttl))
-                    .build(),
-            )
-        }
-        None => Arc::new(
-            CacheBuilder::new(0)
-                .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
-                    value.0.len() as u32 // Weight by data size
-                })
-                .time_to_live(Duration::from_secs(max_ttl))
-                .build(),
-        ),
+    let cache_size = match config.cache.max_size_mb {
+        Some(size) => size * 1024 * 1024,
+        None => 100 * 1024 * 1024, // Default to 100MB cache size
     };
+
+    let cache = Arc::new(
+        CacheBuilder::new(cache_size * 1024 * 1024)
+            .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
+                value.0.len() as u32 // Weight by data size
+            })
+            .time_to_live(Duration::from_secs(max_ttl))
+            .build(),
+    );
+
+    println!("Cache initialized: {} MB", cache_size / 1_024 / 1_024);
 
     let state = AppState {
         pool,
