@@ -4,7 +4,7 @@ url = "postgres://postgres:password@localhost:5432/pledge"
 
 [cache]
 global_ttl = 30
-max_size_mb = 100
+max_size_mib = 10
 
 [server]
 port = 3000
