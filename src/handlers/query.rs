@@ -28,7 +28,6 @@ pub async fn query_handler(
     println!("Params: {:?}", body.params);
 
     let matched_template = state.matcher.find_template(&body.sql);
-    // let template_match = state.matcher.template_exists(&body.sql);
     let key = cache_key(&body.sql, &body.params);
 
     if matched_template.is_some() {
