@@ -1,6 +1,9 @@
 use moka::sync::CacheBuilder;
 use sqlx::postgres::PgPoolOptions;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 mod cache;
 mod config;
@@ -29,11 +32,28 @@ async fn main() {
         .max()
         .unwrap_or(config.cache.global_ttl)
         .max(config.cache.global_ttl);
-    let cache = Arc::new(
-        CacheBuilder::new(config.cache.max_size_mb * 1024 * 1024)
-            .time_to_live(Duration::from_secs(max_ttl))
-            .build(),
-    );
+
+    let cache = match config.cache.max_size_mb {
+        Some(size) => {
+            Arc::new(
+                CacheBuilder::new(size * 1024 * 1024)
+                    .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
+                        value.0.len() as u32 // Weight by data size
+                    })
+                    .time_to_live(Duration::from_secs(max_ttl))
+                    .build(),
+            )
+        }
+        None => Arc::new(
+            CacheBuilder::new(0)
+                .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
+                    value.0.len() as u32 // Weight by data size
+                })
+                .time_to_live(Duration::from_secs(max_ttl))
+                .build(),
+        ),
+    };
+
     let state = AppState {
         pool,
         matcher,
