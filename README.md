@@ -81,9 +81,15 @@ Query search_users_by_content:
  }
 ```
 
+Without network
 | SQL Time (ms) | Cache time (ms) | Speedup |
 |------------|------------|------------| 
 | ~533ms | ~0.04ms | ~13,225x |
+
+With network (local)
+| SQL Time (ms) | Cache time (ms) | Speedup |
+|------------|------------|------------| 
+| ~547ms | ~1.5ms | ~367x |
 
 ## Supported Data Types
 As of right now, pledge supports the following Postgres data types:
