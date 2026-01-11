@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::database::value::PostcardValue;
+use crate::metrics::{CACHE_HITS, CACHE_MISSES, TOTAL_QUERY_DURATION, register_cache_hit};
 use crate::server::state::AppState;
 use crate::{cache::store::cache_key, database::conversion};
 use axum::Json;
@@ -24,6 +25,7 @@ pub async fn query_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Response, (StatusCode, String)> {
+    let start = Instant::now();
     println!("Received query: {:}", body.sql);
     println!("Params: {:?}", body.params);
 
@@ -33,7 +35,7 @@ pub async fn query_handler(
     if matched_template.is_some() {
         if let Some((cached_result, expiry)) = state.cache.get(&key) {
             if Instant::now() < expiry {
-                //let bytes = cached_result.to_vec();
+                CACHE_HITS.inc();
                 let query_response = postcard::from_bytes::<QueryResponse>(&cached_result)
                     .map_err(|e| {
                         (
@@ -49,6 +51,9 @@ pub async fn query_handler(
                     .body(json_bytes.into())
                     .unwrap();
                 println!("✓ CACHE HIT (key: {})", &key[0..8]);
+                TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
+                register_cache_hit(start.elapsed());
+                println!("Cache hit duration: {}", start.elapsed().as_secs_f64());
                 return Ok(response);
             } else {
                 println!(
@@ -60,6 +65,7 @@ pub async fn query_handler(
     }
 
     // Cache miss path
+    CACHE_MISSES.inc();
     println!("x CACHE MISS (key: {})", &key[0..8]);
     let rows = execute_query(&state.pool, &body.sql, &body.params).await?;
 
@@ -79,6 +85,7 @@ pub async fn query_handler(
         state.cache.insert(key, (cache_bytes, expiration));
     }
 
+    TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/json")
         .body(json_bytes.into())

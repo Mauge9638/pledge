@@ -8,13 +8,14 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::config::ServerConfig;
-use crate::handlers::{health::health_handler, query::query_handler};
+use crate::handlers::{health::health_handler, metrics::metrics_handler, query::query_handler};
 pub mod state;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/query", post(query_handler))
+        .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
 

@@ -9,9 +9,12 @@ mod cache;
 mod config;
 mod database;
 mod handlers;
+mod metrics;
 mod server;
 pub use cache::matcher::QueryMatcher;
 pub use server::state::AppState;
+
+use crate::metrics::{CACHE_MEMORY_BYTES, CACHE_SIZE};
 
 #[tokio::main]
 async fn main() {
@@ -61,6 +64,19 @@ async fn main() {
             eprintln!("Consider reducing cache size or increasing system RAM");
         }
     }
+
+    // Register metrics
+    metrics::register_metrics();
+    let cache_clone = cache.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            CACHE_SIZE.set(cache_clone.entry_count() as f64);
+            CACHE_MEMORY_BYTES.set(cache_clone.weighted_size() as f64);
+        }
+    });
+
     let state = AppState {
         pool,
         matcher,
