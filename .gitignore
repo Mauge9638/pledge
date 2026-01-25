@@ -1,7 +1,14 @@
-/target
+*
 
-CLAUDE.md
-plan.md
-
-certs/test-cert.pem
-certs/test-key.pem
+!src/
+!src/**
+!.gitignore
+!bacon.toml
+!pledge.toml
+!Cargo.lock
+!Cargo.toml
+!LICENSE
+!NOTICE
+!README.md
+!seed.sql
+!startdb.sh
