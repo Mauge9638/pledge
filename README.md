@@ -89,7 +89,12 @@ Without network
 With network (local)
 | SQL Time (ms) | Cache time (ms) | Speedup |
 |------------|------------|------------| 
-| ~547ms | ~1.5ms | ~367x |
+| ~547ms | ~1.5ms | ~364x |
+
+With network (simulated 50ms network time)
+| SQL Time (ms) | Cache time (ms) | Speedup |
+|------------|------------|------------| 
+| ~597ms | ~51.5ms | ~11x |
 
 ## Supported Data Types
 As of right now, pledge supports the following Postgres data types:
@@ -107,6 +112,27 @@ As of right now, pledge supports the following Postgres data types:
 11. NUMERIC
 12. TIMESTAMP, TIMESTAMPTZ, DATE, TIME
 13. UUID
+
+## Features/Roadmap
+
+### Implemented
+- Per-query TTL cache invalidation (with global TTL fallback).
+- TinyLFU-based eviction when cache is full (using Moka-rs).
+- Prometheus-format metrics.
+- Support for PostgreSQL.
+- HTTPS/TLS support.
+- Configurable cache size limits.
+- Parameterized query support.
+- System usage warning (warns if cache exceeds 80% of available memory).
+
+### Planned
+- PostgreSQL Wire Protocol Support.
+- Support for MySQL.
+- Docker image.
+- Query preloading/warmup.
+- Automatic cache invalidation on writes.
+
+If you have feature requests, please open an issue on GitHub, but please be aware this is still early in development.
 
 ## License
 
