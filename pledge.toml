@@ -8,9 +8,9 @@ max_size_mib = 10
 
 [server]
 port = 3000
-https_port = 3001
-tls_cert_path = "certs/cert.pem"
-tls_key_path = "certs/key.pem"
+#https_port = 3001
+#tls_cert_path = "certs/test-cert.pem"
+#tls_key_path = "certs/test-key.pem"
 
 [[queries]]
 name = "get_user"
