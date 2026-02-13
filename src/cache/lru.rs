@@ -24,8 +24,8 @@ impl Cache {
         let should_remove;
         let result;
         {
-            let inner = self.inner.read().unwrap();
-            match inner.entries.get(key) {
+            let inner_read = self.inner.read().unwrap();
+            match inner_read.entries.get(key) {
                 Some(entry) => {
                     if entry.expires_at < Instant::now() {
                         should_remove = true;
@@ -44,8 +44,8 @@ impl Cache {
         if should_remove {
             self.remove(key);
         }
-        let mut inner = self.inner.write().unwrap();
-        self.move_to_head_inner(&mut inner, key);
+        let mut inner_write = self.inner.write().unwrap();
+        self.move_to_head_inner(&mut inner_write, key);
         result
     }
 
@@ -61,10 +61,10 @@ impl Cache {
             }
         };
 
-        if inner.head.as_deref() == Some(key) {
+        if &inner.head == &Some(key.to_string()) {
             inner.head = entry_next;
         }
-        if inner.tail.as_deref() == Some(key) {
+        if &inner.tail == &Some(key.to_string()) {
             inner.tail = entry_prev;
         }
 
@@ -74,16 +74,6 @@ impl Cache {
 
     pub fn insert(&self, key: String, data: Vec<u8>, ttl: u64) {
         let mut inner = self.inner.write().unwrap();
-
-        // if inner.entries.is_empty() {
-        //     inner.tail = Some(key.clone());
-        // }
-
-        // if let Some(ref old_key) = old_head_key {
-        //     if let Some(old_entry) = inner.entries.get_mut(old_key) {
-        //         old_entry.prev = Some(key.clone());
-        //     }
-        // }
 
         if inner.entries.contains_key(&key) {
             if let Some(entry) = inner.entries.get_mut(&key) {
@@ -110,31 +100,33 @@ impl Cache {
     ///
     /// The key must already be present in the cache.
     fn move_to_head_inner(&self, inner: &mut CacheInner, key: &str) {
-        if !inner.entries.contains_key(key) || inner.head.as_deref() == Some(key) {
+        if !inner.entries.contains_key(key) || &inner.head == &Some(key.to_string()) {
             return;
         }
-        // TODO: Implement case where the key is the tail
 
-        match &inner.head {
-            Some(inner_head) => {
-                let old_head_key = inner_head.clone();
-                inner.head = Some(key.to_string());
-                self.unlink_from_neighbors_inner(inner, key);
+        let (old_tail_key_option, old_head_key_option) = (&inner.tail, inner.head.clone());
 
-                if let Some(old_head) = inner.entries.get_mut(&old_head_key) {
-                    old_head.prev = Some(key.to_string());
-                    if old_head.next.is_none() {
-                        inner.tail = Some(old_head_key.clone())
-                    }
-                }
-                if let Some(new_head) = inner.entries.get_mut(key) {
-                    new_head.next = Some(old_head_key);
-                }
+        if let Some(old_tail_key) = old_tail_key_option
+            && let Some(new_head) = inner.entries.get(key)
+        {
+            if old_tail_key.eq(key) {
+                inner.tail = new_head.prev.clone();
             }
-            // If the head is None, set the head to the key and set the tail to the key
-            None => {
-                inner.head = Some(key.to_string());
-                inner.tail = Some(key.to_string());
+        }
+        self.unlink_from_neighbors_inner(inner, key);
+
+        if old_head_key_option.is_some() {
+            if let Some(new_head) = inner.entries.get_mut(key) {
+                new_head.next = inner.head.clone();
+            }
+            inner.head = Some(key.to_string());
+        } else {
+            inner.head = Some(key.to_string());
+            inner.tail = Some(key.to_string());
+        }
+        if let Some(old_head_key) = old_head_key_option {
+            if let Some(old_head) = inner.entries.get_mut(&old_head_key) {
+                old_head.prev = inner.head.clone();
             }
         }
     }
@@ -147,12 +139,12 @@ impl Cache {
             }
         };
 
-        if let Some(ref old_prev_key) = old_prev {
+        if let Some(old_prev_key) = &old_prev {
             if let Some(old_prev_entry) = inner.entries.get_mut(old_prev_key) {
                 old_prev_entry.next = old_next.clone(); // clone here
             }
         }
-        if let Some(ref old_next_key) = old_next {
+        if let Some(old_next_key) = &old_next {
             if let Some(old_next_entry) = inner.entries.get_mut(old_next_key) {
                 old_next_entry.prev = old_prev; // move here (last use)
             }
