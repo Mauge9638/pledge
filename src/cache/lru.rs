@@ -1,34 +1,67 @@
 use std::{
+    array,
     collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-pub struct Cache {
-    inner: Arc<RwLock<CacheInner>>,
+pub struct Cache<const N: usize> {
+    inner: Arc<[RwLock<CacheInner>; N]>,
 }
 
-impl Cache {
+impl<const N: usize> Cache<N> {
     pub fn new(max_cache_size_mib: u64) -> Self {
-        let inner = Arc::new(RwLock::new(CacheInner::new(
-            max_cache_size_mib * 1024 * 1024,
-        )));
+        let max_shard_size = (max_cache_size_mib * 1024 * 1024) / (N as u64);
+        let inner = Arc::new(array::from_fn::<_, N, _>(|_| {
+            RwLock::new(CacheInner::new(max_shard_size))
+        }));
+
         Cache { inner }
     }
 
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let mut inner = self.inner.write().unwrap();
+        let shard = self.get_cache_shard(key);
+        let mut inner = shard.write().unwrap();
         inner.get(key)
     }
 
     pub fn remove(&self, key: &str) {
-        let mut inner = self.inner.write().unwrap();
+        let shard = self.get_cache_shard(key);
+        let mut inner = shard.write().unwrap();
         inner.remove(key);
     }
 
-    pub fn insert(&self, key: String, data: Vec<u8>, ttl: u64) {
-        let mut inner = self.inner.write().unwrap();
+    pub fn insert(&self, key: String, data: Vec<u8>, ttl: Instant) {
+        let shard = self.get_cache_shard(&key);
+        let mut inner = shard.write().unwrap();
         inner.insert(key, data, ttl);
+    }
+
+    pub fn entry_count(&self) -> u64 {
+        let mut total_entries: u64 = 0;
+        self.inner
+            .iter()
+            .for_each(|inner| total_entries += inner.read().unwrap().entries.len() as u64);
+        total_entries
+    }
+    pub fn cache_size_bytes(&self) -> u64 {
+        let mut total_bytes: u64 = 0;
+        self.inner
+            .iter()
+            .for_each(|inner| total_bytes += inner.read().unwrap().current_size_bytes);
+        total_bytes
+    }
+
+    fn get_cache_shard(&self, key: &str) -> &RwLock<CacheInner> {
+        let cache_shard_key = self.get_cache_shard_key(&key);
+        &self.inner[cache_shard_key]
+    }
+
+    fn get_cache_shard_key<T: Hash>(&self, key: &T) -> usize {
+        let mut s = DefaultHasher::new();
+        key.hash(&mut s);
+        s.finish() as usize % N
     }
 }
 
@@ -73,23 +106,26 @@ impl CacheInner {
         }
     }
 
-    fn insert(&mut self, key: String, data: Vec<u8>, ttl: u64) {
+    fn insert(&mut self, key: String, data: Vec<u8>, ttl: Instant) {
         if self.entries.contains_key(&key) {
             if let Some(entry) = self.entries.get_mut(&key) {
                 let old_entry_size = entry.get_size(&key);
                 entry.data = data;
-                entry.expires_at = Instant::now() + Duration::from_secs(ttl);
+                entry.expires_at = ttl;
                 let new_entry_size = entry.get_size(&key);
-                while self.current_size_bytes + new_entry_size > self.max_size_bytes {
+                while self.current_size_bytes + new_entry_size
+                    > self.max_size_bytes + old_entry_size
+                {
                     self.evict_tail();
                 }
-                self.current_size_bytes = self.current_size_bytes - old_entry_size + new_entry_size;
+                self.current_size_bytes += new_entry_size;
+                self.current_size_bytes -= old_entry_size;
                 self.move_to_head(&key);
             }
         } else {
             let entry = Entry {
                 data,
-                expires_at: Instant::now() + Duration::from_secs(ttl),
+                expires_at: ttl,
                 prev: None,
                 next: None,
             };
@@ -203,7 +239,7 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
+    use std::{thread::sleep, time::Duration};
 
     // === Basic Operations ===
 
@@ -218,7 +254,11 @@ mod tests {
     #[test]
     fn test_insert_and_get() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         let result = inner.get("key1");
         assert_eq!(result, Some(b"value1".to_vec()));
@@ -233,7 +273,11 @@ mod tests {
     #[test]
     fn test_remove() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.remove("key1");
 
@@ -244,8 +288,16 @@ mod tests {
     #[test]
     fn test_insert_duplicate_key_updates_value() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 60);
-        inner.insert("key1".to_string(), b"updated".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key1".to_string(),
+            b"updated".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         assert_eq!(inner.get("key1"), Some(b"updated".to_vec()));
         assert_eq!(inner.entries.len(), 1);
@@ -256,7 +308,11 @@ mod tests {
     #[test]
     fn test_ttl_expiration() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 1); // 1 second TTL
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(1),
+        ); // 1 second TTL
 
         // Should exist immediately
         assert_eq!(inner.get("key1"), Some(b"value1".to_vec()));
@@ -273,7 +329,11 @@ mod tests {
     #[test]
     fn test_single_entry_is_head_and_tail() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         assert_eq!(inner.head, Some("key1".to_string()));
         assert_eq!(inner.tail, Some("key1".to_string()));
@@ -282,7 +342,11 @@ mod tests {
     #[test]
     fn test_single_entry_has_no_neighbors() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"value1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"value1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         assert_eq!(inner.entries.get("key1").unwrap().prev, None);
         assert_eq!(inner.entries.get("key1").unwrap().next, None);
@@ -293,9 +357,21 @@ mod tests {
     #[test]
     fn test_insert_order_newest_is_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         assert_eq!(inner.head, Some("key3".to_string()));
         assert_eq!(inner.tail, Some("key1".to_string()));
@@ -304,9 +380,21 @@ mod tests {
     #[test]
     fn test_insert_order_linked_list_integrity() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // Order should be: key3 (head) <-> key2 <-> key1 (tail)
 
@@ -340,9 +428,21 @@ mod tests {
     #[test]
     fn test_get_moves_to_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // Order: key3 (head) <-> key2 <-> key1 (tail)
 
@@ -357,9 +457,21 @@ mod tests {
     #[test]
     fn test_get_middle_element_moves_to_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // Order: key3 (head) <-> key2 <-> key1 (tail)
 
@@ -384,8 +496,16 @@ mod tests {
     #[test]
     fn test_get_head_does_not_change_order() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // key2 is head
         inner.get("key2");
@@ -400,14 +520,30 @@ mod tests {
     #[test]
     fn test_insert_duplicate_moves_to_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // Order: key3 (head) <-> key2 <-> key1 (tail)
 
         // Re-insert key1
-        inner.insert("key1".to_string(), b"v1_updated".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1_updated".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // key1 should now be head
         assert_eq!(inner.head, Some("key1".to_string()));
@@ -419,8 +555,16 @@ mod tests {
     #[test]
     fn test_remove_head_updates_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // key2 is head
         inner.remove("key2");
@@ -432,8 +576,16 @@ mod tests {
     #[test]
     fn test_remove_tail_updates_tail() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // key1 is tail
         inner.remove("key1");
@@ -445,9 +597,21 @@ mod tests {
     #[test]
     fn test_remove_middle_links_neighbors() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         // Order: key3 <-> key2 <-> key1
         inner.remove("key2");
@@ -466,7 +630,11 @@ mod tests {
     #[test]
     fn test_remove_last_entry() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.remove("key1");
 
@@ -478,9 +646,21 @@ mod tests {
     #[test]
     fn test_evict_tail_removes_least_recent() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
-        inner.insert("key2".to_string(), b"v2".to_vec(), 60);
-        inner.insert("key3".to_string(), b"v3".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key2".to_string(),
+            b"v2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            b"v3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // Order: key3 (head) <-> key2 <-> key1 (tail)
 
         inner.evict_tail();
@@ -494,7 +674,11 @@ mod tests {
     #[test]
     fn test_evict_tail_single_entry() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("key1".to_string(), b"v1".to_vec(), 60);
+        inner.insert(
+            "key1".to_string(),
+            b"v1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.evict_tail();
 
@@ -515,9 +699,21 @@ mod tests {
     #[test]
     fn test_insert_get_remove_sequence() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // c (head) <-> b <-> a (tail)
 
         inner.get("a"); // move a to head
@@ -538,9 +734,21 @@ mod tests {
     #[test]
     fn test_multiple_gets_maintain_order() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // c (head) <-> b <-> a (tail)
 
         inner.get("a");
@@ -554,11 +762,31 @@ mod tests {
     #[test]
     fn test_five_entries_insert_order() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e (head) <-> d <-> c <-> b <-> a (tail)
 
         assert_eq!(inner.head, Some("e".to_string()));
@@ -581,11 +809,31 @@ mod tests {
     #[test]
     fn test_five_entries_get_tail_moves_to_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.get("a");
@@ -606,11 +854,31 @@ mod tests {
     #[test]
     fn test_five_entries_get_second_from_tail() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.get("b");
@@ -631,11 +899,31 @@ mod tests {
     #[test]
     fn test_five_entries_get_middle() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.get("c");
@@ -657,11 +945,31 @@ mod tests {
     #[test]
     fn test_five_entries_get_second_from_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.get("d");
@@ -682,11 +990,31 @@ mod tests {
     #[test]
     fn test_five_entries_remove_middle() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.remove("c");
@@ -706,11 +1034,31 @@ mod tests {
     #[test]
     fn test_five_entries_remove_head() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.remove("e");
         // d <-> c <-> b <-> a
@@ -725,11 +1073,31 @@ mod tests {
     #[test]
     fn test_five_entries_remove_tail() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.remove("a");
         // e <-> d <-> c <-> b
@@ -744,11 +1112,31 @@ mod tests {
     #[test]
     fn test_five_entries_multiple_gets_then_evict() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
         inner.get("a"); // a to head
@@ -768,14 +1156,38 @@ mod tests {
     #[test]
     fn test_five_entries_insert_duplicate_from_middle() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // e <-> d <-> c <-> b <-> a
 
-        inner.insert("c".to_string(), b"updated".to_vec(), 60);
+        inner.insert(
+            "c".to_string(),
+            b"updated".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
         // c (head) <-> e <-> d <-> b <-> a (tail)
 
         assert_eq!(inner.head, Some("c".to_string()));
@@ -792,11 +1204,31 @@ mod tests {
     #[test]
     fn test_five_entries_evict_all() {
         let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert("a".to_string(), b"1".to_vec(), 60);
-        inner.insert("b".to_string(), b"2".to_vec(), 60);
-        inner.insert("c".to_string(), b"3".to_vec(), 60);
-        inner.insert("d".to_string(), b"4".to_vec(), 60);
-        inner.insert("e".to_string(), b"5".to_vec(), 60);
+        inner.insert(
+            "a".to_string(),
+            b"1".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "b".to_string(),
+            b"2".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "c".to_string(),
+            b"3".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "d".to_string(),
+            b"4".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "e".to_string(),
+            b"5".to_vec(),
+            Instant::now() + Duration::from_secs(60),
+        );
 
         inner.evict_tail(); // removes a
         inner.evict_tail(); // removes b
@@ -819,14 +1251,18 @@ mod tests {
     fn test_concurrent_inserts_and_gets() {
         use std::thread;
 
-        let cache = Arc::new(Cache::new(10));
+        let cache = Arc::new(Cache::<6>::new(10));
         let mut handles = vec![];
 
         // Spawn writers
         for i in 0..100 {
             let cache = Arc::clone(&cache);
             handles.push(thread::spawn(move || {
-                cache.insert(format!("key{}", i), vec![i as u8], 60);
+                cache.insert(
+                    format!("key{}", i),
+                    vec![i as u8],
+                    Instant::now() + Duration::from_secs(60),
+                );
             }));
         }
 

@@ -11,7 +11,7 @@ use crate::config::ServerConfig;
 use crate::handlers::{health::health_handler, metrics::metrics_handler, query::query_handler};
 pub mod state;
 
-pub fn create_router(state: AppState) -> Router {
+pub fn create_router<const N: usize>(state: AppState<N>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/query", post(query_handler))
@@ -19,7 +19,7 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn run_server(server_config: &ServerConfig, state: AppState) {
+pub async fn run_server<const N: usize>(server_config: &ServerConfig, state: AppState<N>) {
     let routes = create_router(state);
     let cloned_routes = routes.clone();
     let port = server_config.port;
