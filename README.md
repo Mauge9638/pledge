@@ -107,7 +107,6 @@ As of right now, pledge supports the following Postgres data types:
 - Query preloading/warmup.
 - Automatic cache invalidation on writes.
 - LFU-based eviction.
-- SQL Wire protocol
 
 If you have feature requests, please open an issue on GitHub, but please be aware this is still early in development.
 
