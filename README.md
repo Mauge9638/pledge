@@ -16,7 +16,7 @@ Pledge is also meant to be used as a pass-through layer for Postgres, allowing y
 ```mermaid
 graph LR
     A[Your Application] -->|HTTP POST| B[Pledge]
-    B -->|Cache Hit| C[(Moka Cache)]
+    B -->|Cache Hit| C[(Cache)]
     B -->|Cache Miss| D[(Postgres)]
     D -->|Query Result| B
     B -->|Store| C
@@ -71,31 +71,6 @@ sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_matc
 
 ```
 
-## Preliminary benchmarking
-
-Query search_users_by_content:
-```json 
-{
-   "sql": "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_match FROM users u JOIN posts p ON u.id = p.user_id WHERE p.content ILIKE $1 OR p.content ILIKE $2 OR p.title ILIKE $3 GROUP BY u.email ORDER BY match_count DESC LIMIT 20",
-   "params": ["%Lorem%", "%sit%", "%Post%"]
- }
-```
-
-Without network
-| SQL Time (ms) | Cache time (ms) | Speedup |
-|------------|------------|------------| 
-| ~533ms | ~0.04ms | ~13,225x |
-
-With network (local)
-| SQL Time (ms) | Cache time (ms) | Speedup |
-|------------|------------|------------| 
-| ~547ms | ~1.5ms | ~364x |
-
-With network (simulated 50ms network time)
-| SQL Time (ms) | Cache time (ms) | Speedup |
-|------------|------------|------------| 
-| ~597ms | ~51.5ms | ~11x |
-
 ## Supported Data Types
 As of right now, pledge supports the following Postgres data types:
 
@@ -117,7 +92,7 @@ As of right now, pledge supports the following Postgres data types:
 
 ### Implemented
 - Per-query TTL cache invalidation (with global TTL fallback).
-- TinyLFU-based eviction when cache is full (using Moka-rs).
+- LRU-based eviction when cache is full.
 - Prometheus-format metrics.
 - Support for PostgreSQL.
 - HTTPS/TLS support.
@@ -131,6 +106,8 @@ As of right now, pledge supports the following Postgres data types:
 - Docker image.
 - Query preloading/warmup.
 - Automatic cache invalidation on writes.
+- LFU-based eviction.
+- SQL Wire protocol
 
 If you have feature requests, please open an issue on GitHub, but please be aware this is still early in development.
 
