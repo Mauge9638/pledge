@@ -1,9 +1,5 @@
-use moka::sync::CacheBuilder;
 use sqlx::postgres::PgPoolOptions;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 mod cache;
 mod config;
@@ -14,43 +10,34 @@ mod server;
 pub use cache::matcher::QueryMatcher;
 pub use server::state::AppState;
 
-use crate::metrics::{CACHE_MEMORY_BYTES, CACHE_SIZE};
+use crate::{
+    cache::lru::Cache,
+    metrics::{CACHE_MEMORY_BYTES, CACHE_SIZE},
+};
 
 #[tokio::main]
 async fn main() {
     let config = config::load_config().expect("Failed to load config");
     let pool = Arc::new(
         PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(10)
+            .acquire_timeout(Duration::from_secs(60))
             .connect(&config.database.url)
             .await
             .expect("Failed to connect to database"),
     );
     let matcher = Arc::new(QueryMatcher::new(&config));
 
-    let max_ttl = config
-        .queries
-        .iter()
-        .filter_map(|q| q.ttl)
-        .max()
-        .unwrap_or(config.cache.global_ttl)
-        .max(config.cache.global_ttl);
-
     let cache_size = match config.cache.max_size_mib {
-        Some(size) => size * 1_024 * 1_024,
-        None => 100 * 1_024 * 1_024, // Default to 100MiB cache size
+        Some(size) => size,
+        None => 100, // Default to 100MiB cache size
     };
 
-    let cache = Arc::new(
-        CacheBuilder::new(cache_size)
-            .weigher(|_key: &String, value: &(Vec<u8>, Instant)| {
-                value.0.len() as u32 // Weight by data size
-            })
-            .time_to_live(Duration::from_secs(max_ttl))
-            .build(),
-    );
+    const CACHE_SHARDS: usize = 64;
 
-    println!("Cache initialized: {} MiB", cache_size / 1_024 / 1_024);
+    let cache = Arc::new(Cache::<CACHE_SHARDS>::new(cache_size));
+
+    println!("Cache initialized: {} MiB", cache_size);
     {
         let sysinfo = sysinfo::System::new_all();
         let total_ram = sysinfo.total_memory();
@@ -73,7 +60,7 @@ async fn main() {
         loop {
             interval.tick().await;
             CACHE_SIZE.set(cache_clone.entry_count() as f64);
-            CACHE_MEMORY_BYTES.set(cache_clone.weighted_size() as f64);
+            CACHE_MEMORY_BYTES.set(cache_clone.cache_size_bytes() as f64);
         }
     });
 

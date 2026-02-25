@@ -1,12 +1,12 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
-use crate::QueryMatcher;
+use crate::{QueryMatcher, cache::lru::Cache};
 use sqlx::PgPool;
 
 #[derive(Clone)]
-pub struct AppState {
+pub struct AppState<const N: usize> {
     pub pool: Arc<PgPool>,
     pub matcher: Arc<QueryMatcher>,
-    pub cache: Arc<moka::sync::Cache<String, (Vec<u8>, Instant)>>, // First value (Vec<u8>) is the serialized response, second value (Instant) is the expiration time
+    pub cache: Arc<Cache<N>>,
     pub global_ttl: u64,
 }

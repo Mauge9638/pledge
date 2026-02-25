@@ -21,8 +21,8 @@ pub struct QueryResponse {
     rows: Vec<PostcardValue>,
 }
 
-pub async fn query_handler(
-    axum::extract::State(state): axum::extract::State<AppState>,
+pub async fn query_handler<const N: usize>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let start = Instant::now();
@@ -33,34 +33,27 @@ pub async fn query_handler(
     let key = cache_key(&body.sql, &body.params);
 
     if matched_template.is_some() {
-        if let Some((cached_result, expiry)) = state.cache.get(&key) {
-            if Instant::now() < expiry {
-                CACHE_HITS.inc();
-                let query_response = postcard::from_bytes::<QueryResponse>(&cached_result)
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Postcard error: {}", e),
-                        )
-                    })?;
-                let json_value = response_to_json(&query_response);
-                let json_bytes = serde_json::to_vec(&json_value)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let response = Response::builder()
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(json_bytes.into())
-                    .unwrap();
-                println!("✓ CACHE HIT (key: {})", &key[0..8]);
-                TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
-                register_cache_hit(start.elapsed());
-                println!("Cache hit duration: {}", start.elapsed().as_secs_f64());
-                return Ok(response);
-            } else {
-                println!(
-                    "✓ CACHE HIT, but cache expired per entry level TTL, invalidating and retrieving new value"
-                );
-                state.cache.invalidate(&key);
-            }
+        if let Some(cached_result) = state.cache.get(&key) {
+            CACHE_HITS.inc();
+            let query_response =
+                postcard::from_bytes::<QueryResponse>(&cached_result).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Postcard error: {}", e),
+                    )
+                })?;
+            let json_value = response_to_json(&query_response);
+            let json_bytes = serde_json::to_vec(&json_value)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let response = Response::builder()
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(json_bytes.into())
+                .unwrap();
+            println!("✓ CACHE HIT (key: {})", &key[0..8]);
+            TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
+            register_cache_hit(start.elapsed());
+            println!("Cache hit duration: {}", start.elapsed().as_secs_f64());
+            return Ok(response);
         }
     }
 
@@ -82,7 +75,7 @@ pub async fn query_handler(
             None => Instant::now() + Duration::from_secs(state.global_ttl),
         };
         println!("[_] Stored in cache: {}", key);
-        state.cache.insert(key, (cache_bytes, expiration));
+        state.cache.insert(key, cache_bytes, expiration);
     }
 
     TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());

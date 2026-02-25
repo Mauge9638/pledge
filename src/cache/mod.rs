@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+pub mod lru;
 pub mod matcher;
 pub mod store;
 
