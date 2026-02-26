@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::{QueryMatcher, cache::lru::Cache};
+use crate::{QueryMatcher, cache::lfu::Cache};
 use sqlx::PgPool;
 
 #[derive(Clone)]
-pub struct AppState<const N: usize> {
+pub struct AppState {
     pub pool: Arc<PgPool>,
     pub matcher: Arc<QueryMatcher>,
-    pub cache: Arc<Cache<N>>,
+    pub cache: Arc<Cache>,
     pub global_ttl: u64,
 }

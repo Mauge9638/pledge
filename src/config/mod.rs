@@ -16,10 +16,39 @@ pub struct DatabaseConfig {
     pub url: String,
 }
 
+pub struct CacheSettings {
+    pub global_ttl: u64,
+    pub cache_size: u64,
+    pub cache_shards: usize,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CacheConfig {
-    pub global_ttl: u64,
+    pub global_ttl: Option<u64>,
     pub max_size_mib: Option<u64>,
+    pub cache_shards: Option<u8>,
+}
+impl CacheConfig {
+    pub fn get_cache_settings(&self) -> CacheSettings {
+        let global_ttl = match self.global_ttl {
+            Some(ttl) => ttl,
+            None => 60, // Default to 60 second TTL
+        };
+        let cache_size = match self.max_size_mib {
+            Some(size) => size,
+            None => 100, // Default to 100MiB cache size
+        };
+
+        let cache_shards = match self.cache_shards {
+            Some(shards) => shards as usize,
+            None => 16 as usize,
+        };
+        CacheSettings {
+            global_ttl,
+            cache_size,
+            cache_shards,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
