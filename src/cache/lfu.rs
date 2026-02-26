@@ -21,6 +21,7 @@ impl Cache {
                 .map(|_| RwLock::new(CacheInner::new(max_shard_size)))
                 .collect::<Vec<_>>(),
         );
+
         Cache {
             inner,
             shards: cache_shards,
@@ -157,7 +158,7 @@ impl CacheInner {
                 || least_accessed_key.is_empty()
             {
                 (least_accessed_key, least_accessed_amount) =
-                    (key.clone(), entry.counter.as_ptr() as u64)
+                    (key.clone(), entry.counter.load(Ordering::Relaxed) as u64)
             }
         });
         if !least_accessed_key.is_empty() {
@@ -175,7 +176,6 @@ struct Entry {
 impl Entry {
     fn get_size(&self, key: &str) -> u64 {
         let data_size = self.data.len() as u64;
-
         data_size + (key.len() * 3) as u64
     }
 }
@@ -186,7 +186,20 @@ mod tests {
     use super::*;
     use std::{thread::sleep, time::Duration};
 
-    // === Basic Operations ===
+    fn helper_create_1mb_entry(key: &str, expires_in_seconds: u64) -> Entry {
+        let one_mb_in_bytes: u32 = 1_048_576;
+        let key_size = (key.len() * 3) as u32;
+        let data = helper_create_1mb_vector(one_mb_in_bytes - key_size);
+
+        Entry {
+            data,
+            counter: AtomicU64::new(0),
+            expires_at: Instant::now() + Duration::from_secs(expires_in_seconds),
+        }
+    }
+    fn helper_create_1mb_vector(size: u32) -> Vec<u8> {
+        (0..size).map(|_| 255).collect()
+    }
 
     #[test]
     fn test_new_cache_is_empty() {
@@ -278,6 +291,50 @@ mod tests {
     fn test_remove_nonexistent_key() {
         let mut cache = CacheInner::new(10 * 1024 * 1024);
         cache.remove("ghost"); // should not panic
+    }
+
+    #[test]
+    fn test_full_cache_evicts_non_accessed() {
+        let mut inner = CacheInner::new(4 * 1024 * 1024);
+        inner.insert(
+            "key1".to_string(),
+            helper_create_1mb_entry("key1", 60).data,
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        inner.insert(
+            "key2".to_string(),
+            helper_create_1mb_entry("key2", 60).data,
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key3".to_string(),
+            helper_create_1mb_entry("key3", 60).data,
+            Instant::now() + Duration::from_secs(60),
+        );
+        inner.insert(
+            "key4".to_string(),
+            helper_create_1mb_entry("key4", 60).data,
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        inner.get("key2");
+        for _ in 0..10 {
+            inner.get("key3");
+            inner.get("key4");
+        }
+
+        inner.insert(
+            "key5".to_string(),
+            helper_create_1mb_entry("key5", 60).data,
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert_eq!(inner.entries.len(), 4);
+        assert_eq!(inner.entries.get("key1").is_none(), true);
+        assert_eq!(inner.entries.get("key2").is_some(), true);
+        assert_eq!(inner.entries.get("key3").is_some(), true);
+        assert_eq!(inner.entries.get("key4").is_some(), true);
+        assert_eq!(inner.entries.get("key5").is_some(), true);
     }
 
     #[test]
