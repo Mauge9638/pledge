@@ -19,6 +19,7 @@ fn helper_create_1mb_entry_data(key: &str) -> Vec<u8> {
     helper_create_vector(one_mb_in_bytes - overhead)
 }
 
+#[cfg(test)]
 fn helper_create_custom_size_entry_data(key: &str, total_bytes_size: u64) -> Vec<u8> {
     let entry = Entry {
         data: vec![1],
@@ -35,10 +36,12 @@ fn helper_create_custom_size_entry_data(key: &str, total_bytes_size: u64) -> Vec
     helper_create_vector(total_bytes_size - overhead)
 }
 
+#[cfg(test)]
 fn helper_create_vector(size: u64) -> Vec<u8> {
     (0..size).map(|_| 255).collect()
 }
 
+#[cfg(test)]
 fn helper_insert_entry(key: &str, data: Vec<u8>, expires_in: u64, inner: &mut CacheInner) {
     inner.insert(
         key.to_string(),
