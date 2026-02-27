@@ -81,14 +81,14 @@ impl Cache {
     }
 }
 
-struct CacheInner {
-    entries: HashMap<String, Entry>,
-    current_size_bytes: u64,
-    max_size_bytes: u64,
+pub(super) struct CacheInner {
+    pub(super) entries: HashMap<String, Entry>,
+    pub(super) current_size_bytes: u64,
+    pub(super) max_size_bytes: u64,
 }
 
 impl CacheInner {
-    fn new(max_size_bytes: u64) -> Self {
+    pub(super) fn new(max_size_bytes: u64) -> Self {
         CacheInner {
             entries: HashMap::new(),
             current_size_bytes: 0,
@@ -99,7 +99,7 @@ impl CacheInner {
     /// Returns 2 values in a tuple
     ///
     /// The first value is the data, the second value is a boolean indicating if the entry should be removed
-    fn get(&self, key: &str) -> (Option<Vec<u8>>, bool) {
+    pub(super) fn get(&self, key: &str) -> (Option<Vec<u8>>, bool) {
         let entry = match self.entries.get(key) {
             Some(entry) => entry,
             None => return (None, false),
@@ -112,7 +112,7 @@ impl CacheInner {
         (Some(data), false)
     }
 
-    fn remove(&mut self, key: &str) {
+    pub(super) fn remove(&mut self, key: &str) {
         let entry_option = self.entries.get(key);
         if let Some(entry) = entry_option {
             self.current_size_bytes -= entry.get_size(key);
@@ -120,7 +120,7 @@ impl CacheInner {
         }
     }
 
-    fn insert(&mut self, key: String, data: Vec<u8>, ttl: Instant) {
+    pub(super) fn insert(&mut self, key: String, data: Vec<u8>, ttl: Instant) {
         if self.entries.contains_key(&key) {
             if let Some(entry) = self.entries.get_mut(&key) {
                 let old_entry_size = entry.get_size(&key);
@@ -150,7 +150,7 @@ impl CacheInner {
         }
     }
 
-    fn evict_lfu(&mut self) {
+    pub(super) fn evict_lfu(&mut self) {
         let (mut least_accessed_key, mut least_accessed_amount): (String, u64) =
             ("".to_string(), 0);
         self.entries.iter().for_each(|(key, entry)| {
@@ -167,205 +167,17 @@ impl CacheInner {
     }
 }
 
-struct Entry {
-    data: Vec<u8>,
-    expires_at: Instant,
-    counter: AtomicU64,
+pub(super) struct Entry {
+    pub(super) data: Vec<u8>,
+    pub(super) expires_at: Instant,
+    pub(super) counter: AtomicU64,
 }
 
 impl Entry {
-    fn get_size(&self, key: &str) -> u64 {
-        let data_size = self.data.len() as u64;
-        data_size + (key.len() * 3) as u64
-    }
-}
-
-// Tests
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{thread::sleep, time::Duration};
-
-    fn helper_create_1mb_entry(key: &str, expires_in_seconds: u64) -> Entry {
-        let one_mb_in_bytes: u32 = 1_048_576;
-        let key_size = (key.len() * 3) as u32;
-        let data = helper_create_1mb_vector(one_mb_in_bytes - key_size);
-
-        Entry {
-            data,
-            counter: AtomicU64::new(0),
-            expires_at: Instant::now() + Duration::from_secs(expires_in_seconds),
-        }
-    }
-    fn helper_create_1mb_vector(size: u32) -> Vec<u8> {
-        (0..size).map(|_| 255).collect()
-    }
-
-    #[test]
-    fn test_new_cache_is_empty() {
-        let inner = CacheInner::new(10 * 1024 * 1024);
-        assert_eq!(inner.entries.len(), 0);
-    }
-
-    #[test]
-    fn test_insert_and_get() {
-        let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert(
-            "key1".to_string(),
-            b"value1".to_vec(),
-            Instant::now() + Duration::from_secs(60),
-        );
-
-        let result = inner.get("key1");
-        assert_eq!(result, (Some(b"value1".to_vec()), false));
-    }
-
-    #[test]
-    fn test_get_nonexistent_key() {
-        let inner = CacheInner::new(10 * 1024 * 1024);
-        assert_eq!(inner.get("missing"), (None, false));
-    }
-
-    #[test]
-    fn test_remove() {
-        let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert(
-            "key1".to_string(),
-            b"value1".to_vec(),
-            Instant::now() + Duration::from_secs(60),
-        );
-
-        inner.remove("key1");
-
-        assert_eq!(inner.get("key1"), (None, false));
-        assert_eq!(inner.entries.len(), 0);
-    }
-
-    #[test]
-    fn test_insert_duplicate_key_updates_value() {
-        let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert(
-            "key1".to_string(),
-            b"value1".to_vec(),
-            Instant::now() + Duration::from_secs(60),
-        );
-        inner.insert(
-            "key1".to_string(),
-            b"updated".to_vec(),
-            Instant::now() + Duration::from_secs(60),
-        );
-
-        assert_eq!(inner.get("key1"), (Some(b"updated".to_vec()), false));
-        assert_eq!(inner.entries.len(), 1);
-    }
-
-    // === TTL Expiration ===
-
-    #[test]
-    fn test_ttl_expiration() {
-        let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.insert(
-            "key1".to_string(),
-            b"value1".to_vec(),
-            Instant::now() + Duration::from_secs(1),
-        ); // 1 second TTL
-
-        // Should exist immediately
-        assert_eq!(inner.get("key1"), (Some(b"value1".to_vec()), false));
-
-        // Wait for expiration
-        sleep(Duration::from_secs(2));
-
-        // Should be gone
-        assert_eq!(inner.get("key1"), (None, true));
-    }
-
-    #[test]
-    fn test_evict_lfu_empty_cache() {
-        let mut inner = CacheInner::new(10 * 1024 * 1024);
-        inner.evict_lfu(); // should not panic
-        assert_eq!(inner.entries.len(), 0);
-    }
-
-    #[test]
-    fn test_remove_nonexistent_key() {
-        let mut cache = CacheInner::new(10 * 1024 * 1024);
-        cache.remove("ghost"); // should not panic
-    }
-
-    #[test]
-    fn test_full_cache_evicts_non_accessed() {
-        let mut inner = CacheInner::new(4 * 1024 * 1024);
-        inner.insert(
-            "key1".to_string(),
-            helper_create_1mb_entry("key1", 60).data,
-            Instant::now() + Duration::from_secs(60),
-        );
-
-        inner.insert(
-            "key2".to_string(),
-            helper_create_1mb_entry("key2", 60).data,
-            Instant::now() + Duration::from_secs(60),
-        );
-        inner.insert(
-            "key3".to_string(),
-            helper_create_1mb_entry("key3", 60).data,
-            Instant::now() + Duration::from_secs(60),
-        );
-        inner.insert(
-            "key4".to_string(),
-            helper_create_1mb_entry("key4", 60).data,
-            Instant::now() + Duration::from_secs(60),
-        );
-
-        inner.get("key2");
-        for _ in 0..10 {
-            inner.get("key3");
-            inner.get("key4");
-        }
-
-        inner.insert(
-            "key5".to_string(),
-            helper_create_1mb_entry("key5", 60).data,
-            Instant::now() + Duration::from_secs(60),
-        );
-        assert_eq!(inner.entries.len(), 4);
-        assert_eq!(inner.entries.get("key1").is_none(), true);
-        assert_eq!(inner.entries.get("key2").is_some(), true);
-        assert_eq!(inner.entries.get("key3").is_some(), true);
-        assert_eq!(inner.entries.get("key4").is_some(), true);
-        assert_eq!(inner.entries.get("key5").is_some(), true);
-    }
-
-    #[test]
-    fn test_concurrent_inserts_and_gets() {
-        use std::thread;
-
-        let cache = Arc::new(Cache::new(10, 6));
-        let mut handles = vec![];
-
-        // Spawn writers
-        for i in 0..100 {
-            let cache = Arc::clone(&cache);
-            handles.push(thread::spawn(move || {
-                cache.insert(
-                    format!("key{}", i),
-                    vec![i as u8],
-                    Instant::now() + Duration::from_secs(60),
-                );
-            }));
-        }
-
-        // Spawn readers
-        for i in 0..100 {
-            let cache = Arc::clone(&cache);
-            handles.push(thread::spawn(move || {
-                cache.get(&format!("key{}", i));
-            }));
-        }
-
-        for h in handles {
-            h.join().unwrap(); // no panics = no poisoned locks
-        }
+    pub(super) fn get_size(&self, key: &str) -> u64 {
+        self.data.len() as u64
+            + key.len() as u64
+            + std::mem::size_of_val(&self.counter) as u64
+            + std::mem::size_of_val(&self.expires_at) as u64
     }
 }
