@@ -1,8 +1,10 @@
 use serde::Deserialize;
 
-pub mod lru;
+pub mod lfu;
 pub mod matcher;
 pub mod store;
+#[cfg(test)]
+mod test;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct QueryTemplate {

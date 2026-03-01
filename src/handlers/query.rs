@@ -21,8 +21,8 @@ pub struct QueryResponse {
     rows: Vec<PostcardValue>,
 }
 
-pub async fn query_handler<const N: usize>(
-    axum::extract::State(state): axum::extract::State<AppState<N>>,
+pub async fn query_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let start = Instant::now();

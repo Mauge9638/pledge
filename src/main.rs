@@ -11,7 +11,7 @@ pub use cache::matcher::QueryMatcher;
 pub use server::state::AppState;
 
 use crate::{
-    cache::lru::Cache,
+    cache::lfu::Cache,
     metrics::{CACHE_MEMORY_BYTES, CACHE_SIZE},
 };
 
@@ -28,24 +28,22 @@ async fn main() {
     );
     let matcher = Arc::new(QueryMatcher::new(&config));
 
-    let cache_size = match config.cache.max_size_mib {
-        Some(size) => size,
-        None => 100, // Default to 100MiB cache size
-    };
+    let cache_config = config.cache.get_cache_settings();
 
-    const CACHE_SHARDS: usize = 64;
+    let cache = Arc::new(Cache::new(
+        cache_config.cache_size,
+        cache_config.cache_shards,
+    ));
 
-    let cache = Arc::new(Cache::<CACHE_SHARDS>::new(cache_size));
-
-    println!("Cache initialized: {} MiB", cache_size);
+    println!("Cache initialized: {} MiB", cache_config.cache_size);
     {
         let sysinfo = sysinfo::System::new_all();
         let total_ram = sysinfo.total_memory();
-        if (cache_size as f64) > (total_ram as f64 * 0.8) {
+        if (cache_config.cache_size as f64) > (total_ram as f64 * 0.8) {
             // Using 80% of system RAM
             eprintln!(
                 "WARNING: Cache size {}MiB is close to total system RAM {}MiB",
-                cache_size / (1_024 * 1_024),
+                cache_config.cache_size / (1_024 * 1_024),
                 total_ram / (1_024 * 1_024)
             );
             eprintln!("Consider reducing cache size or increasing system RAM");
@@ -68,7 +66,7 @@ async fn main() {
         pool,
         matcher,
         cache,
-        global_ttl: config.cache.global_ttl,
+        global_ttl: cache_config.global_ttl,
     };
 
     server::run_server(&config.server, state).await;
