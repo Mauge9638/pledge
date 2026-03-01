@@ -92,7 +92,7 @@ As of right now, pledge supports the following Postgres data types:
 
 ### Implemented
 - Per-query TTL cache invalidation (with global TTL fallback).
-- LRU-based eviction when cache is full.
+- LFU-based eviction when cache is full.
 - Prometheus-format metrics.
 - Support for PostgreSQL.
 - HTTPS/TLS support.
@@ -106,7 +106,6 @@ As of right now, pledge supports the following Postgres data types:
 - Docker image.
 - Query preloading/warmup.
 - Automatic cache invalidation on writes.
-- LFU-based eviction.
 
 If you have feature requests, please open an issue on GitHub, but please be aware this is still early in development.
 
