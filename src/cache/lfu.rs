@@ -33,7 +33,7 @@ impl Cache {
         let (data, should_remove): (Option<Vec<u8>>, bool);
         {
             let inner = shard.read().unwrap();
-            (data, should_remove) = inner.get(key).clone();
+            (data, should_remove) = inner.get(key);
         }
         if should_remove && data.is_none() {
             let mut mutable_inner = shard.write().unwrap();
@@ -55,26 +55,24 @@ impl Cache {
     }
 
     pub fn entry_count(&self) -> u64 {
-        let mut total_entries: u64 = 0;
         self.inner
             .iter()
-            .for_each(|inner| total_entries += inner.read().unwrap().entries.len() as u64);
-        total_entries
+            .map(|inner| inner.read().unwrap().entries.len() as u64)
+            .sum()
     }
     pub fn cache_size_bytes(&self) -> u64 {
-        let mut total_bytes: u64 = 0;
         self.inner
             .iter()
-            .for_each(|inner| total_bytes += inner.read().unwrap().current_size_bytes);
-        total_bytes
+            .map(|inner| inner.read().unwrap().current_size_bytes)
+            .sum()
     }
 
     fn get_cache_shard(&self, key: &str) -> &RwLock<CacheInner> {
-        let cache_shard_key = self.get_cache_shard_key(&key);
+        let cache_shard_key = self.get_cache_shard_key(key);
         &self.inner[cache_shard_key]
     }
 
-    fn get_cache_shard_key<T: Hash>(&self, key: &T) -> usize {
+    fn get_cache_shard_key(&self, key: impl Hash) -> usize {
         let mut s = DefaultHasher::new();
         key.hash(&mut s);
         s.finish() as usize % self.shards
@@ -113,28 +111,22 @@ impl CacheInner {
     }
 
     pub(super) fn remove(&mut self, key: &str) {
-        let entry_option = self.entries.get(key);
-        if let Some(entry) = entry_option {
+        if let Some(entry) = self.entries.remove(key) {
             self.current_size_bytes -= entry.get_size(key);
-            self.entries.remove(key);
         }
     }
 
     pub(super) fn insert(&mut self, key: String, data: Vec<u8>, ttl: Instant) {
-        if self.entries.contains_key(&key) {
-            if let Some(entry) = self.entries.get_mut(&key) {
-                let old_entry_size = entry.get_size(&key);
-                entry.data = data;
-                entry.expires_at = ttl;
-                let new_entry_size = entry.get_size(&key);
-                while self.current_size_bytes + new_entry_size
-                    > self.max_size_bytes + old_entry_size
-                {
-                    self.evict_lfu();
-                }
-                self.current_size_bytes += new_entry_size;
-                self.current_size_bytes -= old_entry_size;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            let old_entry_size = entry.get_size(&key);
+            entry.data = data;
+            entry.expires_at = ttl;
+            let new_entry_size = entry.get_size(&key);
+            while self.current_size_bytes + new_entry_size > self.max_size_bytes + old_entry_size {
+                self.evict_lfu();
             }
+            self.current_size_bytes += new_entry_size;
+            self.current_size_bytes -= old_entry_size;
         } else {
             let entry = Entry {
                 data,
@@ -151,18 +143,13 @@ impl CacheInner {
     }
 
     pub(super) fn evict_lfu(&mut self) {
-        let (mut least_accessed_key, mut least_accessed_amount): (String, u64) =
-            ("".to_string(), 0);
-        self.entries.iter().for_each(|(key, entry)| {
-            if (entry.counter.load(Ordering::Relaxed)) < (least_accessed_amount as u64)
-                || least_accessed_key.is_empty()
-            {
-                (least_accessed_key, least_accessed_amount) =
-                    (key.clone(), entry.counter.load(Ordering::Relaxed) as u64)
-            }
-        });
-        if !least_accessed_key.is_empty() {
-            self.remove(&least_accessed_key);
+        if let Some((key, _)) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, e)| e.counter.load(Ordering::Relaxed))
+        {
+            let key = key.clone();
+            self.remove(&key);
         }
     }
 }
