@@ -7,6 +7,7 @@ mod database;
 mod handlers;
 mod metrics;
 mod server;
+mod wire;
 pub use cache::matcher::QueryMatcher;
 pub use server::state::AppState;
 

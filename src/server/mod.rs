@@ -26,7 +26,7 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
     let cloned_routes = routes.clone();
     let port = server_config.port;
 
-    let wire = tokio::spawn(async move {
+    tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 1337)).await {
             Ok(listener) => {
                 println!("Server listening on HTTP on port {}", 1337);
@@ -45,18 +45,6 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
                         stream.peer_addr(),
                         ip
                     );
-                    // let _ = stream.readable().await;
-                    // loop {
-                    //     let mut buffer = [0u8; 1024];
-                    //     match stream.try_read(&mut buffer[..]).await {
-                    //         Ok(n) => {
-                    //             println!("The bytes: {:?}", &buffer[..n]);
-                    //         }
-                    //         Err(err) => {
-                    //             eprintln!("Failed to read from stream: {}", err);
-                    //         }
-                    //     }
-                    // }
                     loop {
                         let _ = stream.readable().await;
                         let mut buffer = [0u8; 1024];
@@ -65,7 +53,23 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
                             Ok(0) => break,
                             Ok(n) => {
                                 println!("read {} bytes", n);
-                                println!("content {:?}", &buffer[..n]);
+                                println!("raw content {:?}", &buffer[..n]);
+                                println!("As string {:?}", std::str::from_utf8(&buffer[..n]));
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("Error occured: {}", e);
+                                return;
+                            }
+                        }
+                        let response = b"N";
+                        match stream.try_write(response) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                println!("sent {} bytes", n);
+                                println!("bytes sent: {:?}", &response[..n]);
                             }
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                 continue;
@@ -76,28 +80,6 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
                             }
                         }
                     }
-                    // let mut buffer = [0u8; 1024];
-                    // loop {
-                    //     // Wait for the socket to be readable
-                    //     let _ = stream.readable().await;
-
-                    //     // Try to read data, this may still fail with `WouldBlock`
-                    //     // if the readiness event is a false positive.
-                    //     match stream.try_read(&mut buffer) {
-                    //         Ok(n) => {
-                    //             buffer.truncate(n);
-                    //             break;
-                    //         }
-                    //         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    //             continue;
-                    //         }
-                    //         Err(e) => {
-                    //             return Err(e.into());
-                    //         }
-                    //     }
-                    // }
-
-                    // println!("GOT = {:?}", buffer);
                 }),
                 Err(err) => tokio::spawn(async move {
                     eprintln!("Failed to accept connection: {}", err);
