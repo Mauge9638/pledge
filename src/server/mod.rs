@@ -1,9 +1,11 @@
+use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::Router;
 use axum::routing::{get, post};
 use axum_server::tls_rustls::RustlsConfig;
+use std::io;
 use tokio::task::JoinHandle;
 
 use crate::AppState;
@@ -23,6 +25,86 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
     let routes = create_router(state);
     let cloned_routes = routes.clone();
     let port = server_config.port;
+
+    let wire = tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 1337)).await {
+            Ok(listener) => {
+                println!("Server listening on HTTP on port {}", 1337);
+                listener
+            }
+            Err(err) => {
+                eprintln!("Failed to bind to port {}: {}", 1337, err);
+                return;
+            }
+        };
+        loop {
+            match listener.accept().await {
+                Ok((stream, ip)) => tokio::spawn(async move {
+                    println!(
+                        "Accepted connection from {:?} on ip {:?}",
+                        stream.peer_addr(),
+                        ip
+                    );
+                    // let _ = stream.readable().await;
+                    // loop {
+                    //     let mut buffer = [0u8; 1024];
+                    //     match stream.try_read(&mut buffer[..]).await {
+                    //         Ok(n) => {
+                    //             println!("The bytes: {:?}", &buffer[..n]);
+                    //         }
+                    //         Err(err) => {
+                    //             eprintln!("Failed to read from stream: {}", err);
+                    //         }
+                    //     }
+                    // }
+                    loop {
+                        let _ = stream.readable().await;
+                        let mut buffer = [0u8; 1024];
+
+                        match stream.try_read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                println!("read {} bytes", n);
+                                println!("content {:?}", &buffer[..n]);
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("Error occured: {}", e);
+                                return;
+                            }
+                        }
+                    }
+                    // let mut buffer = [0u8; 1024];
+                    // loop {
+                    //     // Wait for the socket to be readable
+                    //     let _ = stream.readable().await;
+
+                    //     // Try to read data, this may still fail with `WouldBlock`
+                    //     // if the readiness event is a false positive.
+                    //     match stream.try_read(&mut buffer) {
+                    //         Ok(n) => {
+                    //             buffer.truncate(n);
+                    //             break;
+                    //         }
+                    //         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    //             continue;
+                    //         }
+                    //         Err(e) => {
+                    //             return Err(e.into());
+                    //         }
+                    //     }
+                    // }
+
+                    // println!("GOT = {:?}", buffer);
+                }),
+                Err(err) => tokio::spawn(async move {
+                    eprintln!("Failed to accept connection: {}", err);
+                }),
+            };
+        }
+    });
 
     let http_handle = tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
