@@ -48,7 +48,7 @@ impl Encode for RowDescription<'_> {
                 None => 0,
             };
             let attribute_number = match column.relation_attribute_no() {
-                Some(no) => no as i16,
+                Some(number) => number as i16,
                 None => 0,
             };
             let type_oid = match column.type_info().oid() {
