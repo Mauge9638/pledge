@@ -1,16 +1,14 @@
-use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::Router;
 use axum::routing::{get, post};
 use axum_server::tls_rustls::RustlsConfig;
-use std::io;
 use tokio::task::JoinHandle;
 
-use crate::AppState;
 use crate::config::ServerConfig;
 use crate::handlers::{health::health_handler, metrics::metrics_handler, query::query_handler};
+use crate::{AppState, wire};
 pub mod state;
 
 pub fn create_router(state: AppState) -> Router {
@@ -22,6 +20,7 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 pub async fn run_server(server_config: &ServerConfig, state: AppState) {
+    let postgres_pool = state.pool.clone();
     let routes = create_router(state);
     let cloned_routes = routes.clone();
     let port = server_config.port;
@@ -37,55 +36,7 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
                 return;
             }
         };
-        loop {
-            match listener.accept().await {
-                Ok((stream, ip)) => tokio::spawn(async move {
-                    println!(
-                        "Accepted connection from {:?} on ip {:?}",
-                        stream.peer_addr(),
-                        ip
-                    );
-                    loop {
-                        let _ = stream.readable().await;
-                        let mut buffer = [0u8; 1024];
-
-                        match stream.try_read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!("read {} bytes", n);
-                                println!("raw content {:?}", &buffer[..n]);
-                                println!("As string {:?}", std::str::from_utf8(&buffer[..n]));
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
-                            }
-                        }
-                        let response = b"N";
-                        match stream.try_write(response) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!("sent {} bytes", n);
-                                println!("bytes sent: {:?}", &response[..n]);
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
-                            }
-                        }
-                    }
-                }),
-                Err(err) => tokio::spawn(async move {
-                    eprintln!("Failed to accept connection: {}", err);
-                }),
-            };
-        }
+        wire::listener_start(listener, postgres_pool).await
     });
 
     let http_handle = tokio::spawn(async move {
