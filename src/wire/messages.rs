@@ -4,6 +4,12 @@ use sqlx::{
     postgres::{PgColumn, PgRow, PgTypeInfo, PgValueRef},
 };
 
+/*
+ * Docs to look at for this
+ * https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-SIMPLE-QUERY
+ * https://www.postgresql.org/docs/current/protocol-message-formats.html
+ */
+
 pub(super) trait Encode {
     fn encode(&self) -> Vec<u8>;
 }
