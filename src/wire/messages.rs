@@ -1,8 +1,10 @@
 use bytes::{BufMut, BytesMut};
 use sqlx::{
-    Column, Row, TypeInfo, Value, ValueRef,
-    postgres::{PgColumn, PgRow, PgTypeInfo, PgValueRef},
+    Column, Row, TypeInfo,
+    postgres::{PgColumn, PgRow},
 };
+
+use super::SQLCommand;
 
 /*
  * Docs to look at for this
@@ -95,7 +97,7 @@ impl Encode for DataRow<'_> {
             };
             match row_value {
                 Some(row_value) => {
-                    payload.put_i32((row_value.len() as i32));
+                    payload.put_i32(row_value.len() as i32);
                     payload.put(row_value);
                 }
                 None => payload.put_i32(-1),
@@ -111,13 +113,14 @@ impl Encode for DataRow<'_> {
     }
 }
 
-pub(super) struct CommandComplete {
+pub(super) struct CommandComplete<'a> {
     pub(super) rows: u16,
+    pub(super) command_tag: &'a SQLCommand,
 }
-impl Encode for CommandComplete {
+impl Encode for CommandComplete<'_> {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
-        let command_tag = format!("SELECT {}", self.rows);
+        let command_tag = self.create_command_tag();
         payload.put(command_tag.as_bytes());
         payload.put_u8(0); // null terminator
 
@@ -126,6 +129,22 @@ impl Encode for CommandComplete {
         bytes.put_i32((payload.len() + 4) as i32); // Length of message
         bytes.put(payload);
         bytes.to_vec()
+    }
+}
+
+impl CommandComplete<'_> {
+    fn create_command_tag(&self) -> String {
+        match self.command_tag {
+            SQLCommand::Insert => format!("INSERT 0 {}", self.rows),
+            SQLCommand::Delete => format!("DELETE {}", self.rows),
+            SQLCommand::Update => format!("UPDATE {}", self.rows),
+            SQLCommand::Merge => format!("MERGE {}", self.rows),
+            SQLCommand::Select => format!("SELECT {}", self.rows),
+            SQLCommand::CreateTableAs => format!("SELECT {}", self.rows),
+            SQLCommand::Move => format!("MOVE {}", self.rows),
+            SQLCommand::Fetch => format!("FETCH {}", self.rows),
+            SQLCommand::Copy => format!("COPY {}", self.rows),
+        }
     }
 }
 

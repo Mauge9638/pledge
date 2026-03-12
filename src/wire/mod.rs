@@ -3,11 +3,10 @@ use std::{io, sync::Arc};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use tokio::net::{TcpListener, TcpStream};
 
-use types::WireProtocolStates;
+use types::{SQLCommand, WireProtocolStates};
 
 use messages::{AuthenticationOk, CommandComplete, DataRow, Encode, Query, ReadyForQuery};
-
-use crate::wire::messages::{Decode, RowDescription};
+use messages::{Decode, RowDescription};
 
 mod messages;
 pub mod types;
@@ -35,111 +34,55 @@ pub async fn listener_start(listener: TcpListener, postgres_pool: Arc<PgPool>) {
 
 async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
     let mut state = WireProtocolStates::WaitingForSSL;
+    let mut command_tag: SQLCommand;
     loop {
         let _ = stream.readable().await;
-        let mut buffer = [0u8; 1024];
+        let mut read_buffer = [0u8; 10024];
 
-        match stream.try_read(&mut buffer) {
+        match stream.try_read(&mut read_buffer) {
             Ok(0) => break,
             Ok(n) => {
                 println!(
-                    "-- RECEIVED -- byte length: {}, with raw content {:?}",
+                    "----------------------\nRECEIVED (STATE: {:?})\nbyte length: {}\nraw content {:?}\n----------------------\n",
+                    state,
                     n,
-                    &buffer[..n]
+                    &read_buffer[..n]
                 );
 
                 match state {
                     WireProtocolStates::WaitingForSSL => {
                         let response = b"N";
-                        match stream.try_write(response) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!(
-                                    "-- SENT -- byte length: {}, bytes sent: {:?}",
-                                    n,
-                                    &response[..n]
-                                );
-                                state = WireProtocolStates::WaitingForStartup;
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
-                            }
-                        }
+                        match stream_try_write(&stream, response).await {
+                            Some(_) => state = WireProtocolStates::WaitingForStartup,
+                            None => {}
+                        };
                     }
                     WireProtocolStates::WaitingForStartup => {
                         let auth_ok = &AuthenticationOk.encode();
-                        match stream.try_write(auth_ok) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!(
-                                    "-- SENT -- byte length: {}, bytes sent: {:?}",
-                                    n,
-                                    &auth_ok[..n]
-                                );
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
-                            }
-                        }
+                        stream_try_write(&stream, &auth_ok).await;
                         let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                        match stream.try_write(ready_for_query) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!(
-                                    "-- SENT -- byte length: {}, bytes sent: {:?}",
-                                    n,
-                                    &ready_for_query[..n]
-                                );
-                                state = WireProtocolStates::ReadyForQuery;
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
-                            }
+                        match stream_try_write(&stream, &ready_for_query).await {
+                            Some(_) => state = WireProtocolStates::ReadyForQuery,
+                            None => {}
                         }
                     }
                     WireProtocolStates::ReadyForQuery => {
                         let query_string = Query {
-                            bytes: buffer[..n].to_vec(),
+                            bytes: read_buffer[..n].to_vec(),
                         }
                         .decode();
+                        command_tag = match command_tag_from_query_str(&query_string) {
+                            Some(tag) => tag,
+                            None => return,
+                        };
                         println!("Decoded query: {}", query_string);
-                        match execute_query(&query_string, postgres_pool).await {
-                            Some(results) => {
-                                let _ = stream.writable().await;
-                                respond_to_query(&stream, results).await
-                            }
-                            None => {}
-                        }
-                        let response = &ReadyForQuery { status: b'I' }.encode();
-                        match stream.try_write(response) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!(
-                                    "-- SENT -- byte length: {}, bytes sent: {:?}",
-                                    n,
-                                    &response[..n]
-                                );
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("Error occured: {}", e);
-                                return;
+                        if let Some(results) = execute_query(&query_string, postgres_pool).await {
+                            if let Some(bytes) = create_response_bytes(results, &command_tag) {
+                                stream_try_write(&stream, &bytes).await;
                             }
                         }
+                        let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
+                        stream_try_write(&stream, &ready_for_query).await;
                     }
                 }
             }
@@ -165,65 +108,63 @@ async fn execute_query(query_string: &str, pool: &PgPool) -> Option<Vec<PgRow>> 
     }
 }
 
-async fn respond_to_query(stream: &TcpStream, query_results: Vec<PgRow>) {
+fn create_response_bytes(query_results: Vec<PgRow>, command_tag: &SQLCommand) -> Option<Vec<u8>> {
     let columns = match query_results.first() {
         Some(row) => row.columns(),
-        None => return,
+        None => return None,
     };
-    let row_description = RowDescription { columns: columns }.encode();
-    println!("response: {:?}", query_results);
-    match stream.try_write(&row_description) {
-        Ok(n) => {
-            println!(
-                "-- SENT -- byte length: {}, bytes sent: {:?}",
-                n,
-                &row_description[..n]
-            );
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-            return;
-        }
-        Err(e) => {
-            eprintln!("Error occured: {}", e);
-            return;
-        }
-    }
+    let mut response: Vec<u8> = Vec::new();
+    response.extend(RowDescription { columns: columns }.encode());
     for row in &query_results {
-        let data_row = DataRow { row: row }.encode();
-        match stream.try_write(&data_row) {
-            Ok(n) => {
-                println!(
-                    "-- SENT -- byte length: {}, bytes sent: {:?}",
-                    n,
-                    &data_row[..n]
-                );
+        response.extend(DataRow { row: row }.encode());
+    }
+    response.extend(
+        CommandComplete {
+            rows: query_results.len() as u16,
+            command_tag: command_tag,
+        }
+        .encode(),
+    );
+
+    println!("----------------------\nCOMMAND COMPLETE\n----------------------");
+    Some(response)
+}
+
+fn command_tag_from_query_str(query: &str) -> Option<SQLCommand> {
+    let split = query.split(" ").collect::<Vec<&str>>();
+    let (first, second, third) = (split[0], split[1], split[2]);
+    match first {
+        "SELECT" => Some(SQLCommand::Select),
+        "INSERT" => Some(SQLCommand::Insert),
+        "UPDATE" => Some(SQLCommand::Update),
+        "DELETE" => Some(SQLCommand::Delete),
+        "MERGE" => Some(SQLCommand::Merge),
+        "MOVE" => Some(SQLCommand::Move),
+        "FETCH" => Some(SQLCommand::Fetch),
+        "COPY" => Some(SQLCommand::Copy),
+        "CREATE" => {
+            if second == "TABLE" && third == "AS" {
+                Some(SQLCommand::CreateTableAs)
+            } else {
+                None
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                return;
-            }
+        }
+        _ => None,
+    }
+}
+
+async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
+    let mut written = 0;
+    while written < buf.len() {
+        stream.writable().await.ok()?;
+        match stream.try_write(&buf[written..]) {
+            Ok(n) => written += n,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) => {
-                eprintln!("Error occured: {}", e);
-                return;
+                eprintln!("Error occurred: {}", e);
+                return None;
             }
         }
     }
-    let command_complete = CommandComplete {
-        rows: query_results.len() as u16,
-    };
-    match stream.try_write(&command_complete.encode()) {
-        Ok(n) => {
-            println!(
-                "-- SENT -- byte length: {}, bytes sent: {:?}",
-                n,
-                &command_complete.encode()[..n]
-            );
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-            return;
-        }
-        Err(e) => {
-            eprintln!("Error occured: {}", e);
-            return;
-        }
-    }
+    Some(written)
 }
