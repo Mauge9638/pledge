@@ -1,11 +1,14 @@
 use std::{io, sync::Arc};
 
+use sqlx::error::{DatabaseError, Error};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use tokio::net::{TcpListener, TcpStream};
 
 use types::{SQLCommand, WireProtocolStates};
 
-use messages::{AuthenticationOk, CommandComplete, DataRow, Encode, Query, ReadyForQuery};
+use messages::{
+    AuthenticationOk, CommandComplete, DataRow, Encode, ErrorResponse, Query, ReadyForQuery,
+};
 use messages::{Decode, RowDescription};
 
 mod messages;
@@ -76,11 +79,38 @@ async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
                             None => return,
                         };
                         println!("Decoded query: {}", query_string);
-                        if let Some(results) = execute_query(&query_string, postgres_pool).await {
-                            if let Some(bytes) = create_response_bytes(results, &command_tag) {
-                                stream_try_write(&stream, &bytes).await;
+                        match execute_query(&query_string, postgres_pool).await {
+                            Ok(results) => {
+                                if let Some(bytes) = create_response_bytes(results, &command_tag) {
+                                    stream_try_write(&stream, &bytes).await;
+                                }
+                            }
+                            Err(err) => {
+                                let error_message: String;
+                                let sql_state_code: String
+                                match err.as_database_error() {
+                                    Some(err) => {
+                                        error_message = err.message().to_string();
+                                        match err.code(){
+                                            Some(code)=>
+                                            None => sql_state_code = "42P01".to_string() // Undefined table
+                                        }
+                                    }
+                                    None => error_message = "Unknown error".to_string(),
+                                }
+                                let error = ErrorResponse {
+                                    error_message: error_message,
+                                    sql_state_code: sql_state_code,
+                                }
+                                .encode();
                             }
                         }
+
+                        // if let Ok(results) = execute_query(&query_string, postgres_pool).await {
+                        //     if let Some(bytes) = create_response_bytes(results, &command_tag) {
+                        //         stream_try_write(&stream, &bytes).await;
+                        //     }
+                        // }
                         let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
                         stream_try_write(&stream, &ready_for_query).await;
                     }
@@ -97,13 +127,13 @@ async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
     }
 }
 
-async fn execute_query(query_string: &str, pool: &PgPool) -> Option<Vec<PgRow>> {
+async fn execute_query(query_string: &str, pool: &PgPool) -> Result<Vec<PgRow>, sqlx::Error> {
     let query = sqlx::query(&query_string);
     match query.fetch_all(pool).await {
-        Ok(response) => Some(response),
+        Ok(response) => Ok(response),
         Err(err) => {
             println!("{}", err);
-            None
+            Err(err)
         }
     }
 }
@@ -167,4 +197,26 @@ async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
         }
     }
     Some(written)
+}
+
+fn create_error_message(stream: &TcpStream, err: DatabaseError) -> &[u8] {
+    let error_message: String;
+    let sql_state_code: String
+    match err.as_database_error() {
+        Some(err) => {
+            error_message = err.message().to_string();
+            match err.code(){
+                Some(code)=> {}
+                None => sql_state_code = "42P01".to_string() // Undefined table
+            }
+        }
+        None => error_message = "Unknown error".to_string(),
+    }
+    let error = ErrorResponse {
+        error_message: error_message,
+        sql_state_code: sql_state_code,
+    }
+    .encode();
+
+    &[0]
 }

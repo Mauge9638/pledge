@@ -148,6 +148,22 @@ impl CommandComplete<'_> {
     }
 }
 
+pub(super) struct ErrorResponse {
+    pub(super) error_message: String,
+    pub(super) sql_state_code: String,
+}
+
+impl Encode for ErrorResponse {
+    fn encode(&self) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'E');
+
+        bytes.to_vec()
+    }
+}
+
 // Client
 pub(super) struct Query {
     pub(super) bytes: Vec<u8>,
