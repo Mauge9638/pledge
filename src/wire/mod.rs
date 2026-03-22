@@ -86,23 +86,7 @@ async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
                                 }
                             }
                             Err(err) => {
-                                let error_message: String;
-                                let sql_state_code: String
-                                match err.as_database_error() {
-                                    Some(err) => {
-                                        error_message = err.message().to_string();
-                                        match err.code(){
-                                            Some(code)=>
-                                            None => sql_state_code = "42P01".to_string() // Undefined table
-                                        }
-                                    }
-                                    None => error_message = "Unknown error".to_string(),
-                                }
-                                let error = ErrorResponse {
-                                    error_message: error_message,
-                                    sql_state_code: sql_state_code,
-                                }
-                                .encode();
+                                stream_try_write(&stream, &create_error_message(err)).await;
                             }
                         }
 
@@ -199,24 +183,28 @@ async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
     Some(written)
 }
 
-fn create_error_message(stream: &TcpStream, err: DatabaseError) -> &[u8] {
+fn create_error_message<'a>(err: sqlx::Error) -> Vec<u8> {
     let error_message: String;
-    let sql_state_code: String
+    let sql_state_code: String;
     match err.as_database_error() {
         Some(err) => {
             error_message = err.message().to_string();
-            match err.code(){
-                Some(code)=> {}
-                None => sql_state_code = "42P01".to_string() // Undefined table
+            match err.code() {
+                Some(code) => sql_state_code = code.to_string(),
+                None => sql_state_code = "XX000".to_string(), // Pledge undefined error
             }
         }
-        None => error_message = "Unknown error".to_string(),
+        None => {
+            error_message = "Unknown error".to_string();
+            sql_state_code = "XX000".to_string(); // Pledge undefined error
+        }
     }
+
     let error = ErrorResponse {
         error_message: error_message,
         sql_state_code: sql_state_code,
     }
     .encode();
 
-    &[0]
+    error
 }
