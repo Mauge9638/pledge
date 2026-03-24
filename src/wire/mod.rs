@@ -51,7 +51,6 @@ async fn handle_connection(
     pg_type_lens: &HashMap<u32, i16>,
 ) {
     let mut state = WireProtocolStates::WaitingForSSL;
-    let mut command_tag: SQLCommand;
     'mainloop: loop {
         let _ = stream.readable().await;
         let mut read_buffer = [0u8; 10024];
@@ -189,7 +188,7 @@ async fn execute_query(query_string: &str, pool: &PgPool) -> Result<Vec<PgRow>, 
     match query.fetch_all(pool).await {
         Ok(response) => Ok(response),
         Err(err) => {
-            println!("{}", err);
+            eprintln!("Error occurred: {}", err);
             Err(err)
         }
     }
@@ -304,7 +303,7 @@ async fn get_pg_type_lens(postgres_pool: &PgPool) -> Result<HashMap<u32, i16>, E
             }
         }
         Err(err) => {
-            println!("{}", err);
+            eprintln!("Error occurred: {}", err);
             return Err(err);
         }
     };
