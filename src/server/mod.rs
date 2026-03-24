@@ -7,21 +7,19 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
-use crate::handlers::{health::health_handler, metrics::metrics_handler, query::query_handler};
+use crate::handlers::{health::health_handler, metrics::metrics_handler};
 use crate::{AppState, wire};
 pub mod state;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
-        .route("/query", post(query_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
 
 pub async fn run_server(server_config: &ServerConfig, state: AppState) {
-    let postgres_pool = state.pool.clone();
-    let routes = create_router(state);
+    let routes = create_router(state.clone());
     let cloned_routes = routes.clone();
     let port = server_config.port;
 
@@ -36,7 +34,7 @@ pub async fn run_server(server_config: &ServerConfig, state: AppState) {
                 return;
             }
         };
-        wire::listener_start(listener, postgres_pool).await
+        wire::listener_start(listener, &state).await
     });
 
     let http_handle = tokio::spawn(async move {

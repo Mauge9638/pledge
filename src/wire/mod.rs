@@ -13,43 +13,34 @@ use messages::{
 };
 use messages::{Decode, RowDescription};
 
+use crate::AppState;
 use crate::wire::messages::ErrorResponseSeverity;
 
 mod messages;
 pub mod types;
 
-pub async fn listener_start(listener: TcpListener, postgres_pool: Arc<PgPool>) {
-    if let Ok(types) = get_pg_type_lens(&postgres_pool).await {
-        let pg_type_lens = Arc::new(types);
-        loop {
-            match listener.accept().await {
-                Ok((stream, ip)) => {
-                    let pool = postgres_pool.clone();
-                    let type_lens = pg_type_lens.clone();
-                    tokio::spawn(async move {
-                        println!(
-                            "Accepted connection from {:?} on ip {:?}",
-                            stream.peer_addr(),
-                            ip
-                        );
-                        handle_connection(stream, &pool, &type_lens).await
-                    })
-                }
-                Err(err) => tokio::spawn(async move {
-                    eprintln!("Failed to accept connection: {}", err);
-                }),
-            };
-        }
-    } else {
-        eprintln!("Failed to get pg_type.typlen");
+pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, ip)) => {
+                let state = app_state.clone();
+                tokio::spawn(async move {
+                    println!(
+                        "Accepted connection from {:?} on ip {:?}",
+                        stream.peer_addr(),
+                        ip
+                    );
+                    handle_connection(stream, &state).await
+                })
+            }
+            Err(err) => tokio::spawn(async move {
+                eprintln!("Failed to accept connection: {}", err);
+            }),
+        };
     }
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    postgres_pool: &PgPool,
-    pg_type_lens: &HashMap<u32, i16>,
-) {
+async fn handle_connection(stream: TcpStream, app_state: &AppState) {
     let mut state = WireProtocolStates::WaitingForSSL;
     'mainloop: loop {
         let _ = stream.readable().await;
@@ -100,12 +91,12 @@ async fn handle_connection(
                                 match command_tag_from_query_str(&query_string) {
                                     Some(command_tag) => {
                                         println!("Decoded query: {}", query_string);
-                                        match execute_query(&query_string, postgres_pool).await {
+                                        match execute_query(&query_string, &app_state).await {
                                             Ok(results) => {
                                                 if let Some(bytes) = create_response_bytes(
                                                     results,
                                                     &command_tag,
-                                                    pg_type_lens,
+                                                    &app_state,
                                                 ) {
                                                     stream_try_write(&stream, &bytes).await;
                                                 }
@@ -183,9 +174,12 @@ async fn handle_connection(
     }
 }
 
-async fn execute_query(query_string: &str, pool: &PgPool) -> Result<Vec<PgRow>, sqlx::Error> {
+async fn execute_query(
+    query_string: &str,
+    app_state: &AppState,
+) -> Result<Vec<PgRow>, sqlx::Error> {
     let query = sqlx::query(&query_string);
-    match query.fetch_all(pool).await {
+    match query.fetch_all(app_state.pool.as_ref()).await {
         Ok(response) => Ok(response),
         Err(err) => {
             eprintln!("Error occurred: {}", err);
@@ -197,7 +191,7 @@ async fn execute_query(query_string: &str, pool: &PgPool) -> Result<Vec<PgRow>, 
 fn create_response_bytes(
     query_results: Vec<PgRow>,
     command_tag: &SQLCommand,
-    pg_type_lens: &HashMap<u32, i16>,
+    app_state: &AppState,
 ) -> Option<Vec<u8>> {
     let columns = match query_results.first() {
         Some(row) => row.columns(),
@@ -207,7 +201,7 @@ fn create_response_bytes(
     response.extend(
         RowDescription {
             columns: columns,
-            type_lens: pg_type_lens,
+            type_lens: &app_state.pg_type_lens,
         }
         .encode(),
     );
@@ -293,7 +287,7 @@ fn create_error_message(severity: ErrorResponseSeverity, err: sqlx::Error) -> Ve
     error
 }
 
-async fn get_pg_type_lens(postgres_pool: &PgPool) -> Result<HashMap<u32, i16>, Error> {
+pub async fn get_pg_type_lens(postgres_pool: &PgPool) -> Result<HashMap<u32, i16>, Error> {
     let mut type_lens_hashmap: HashMap<u32, i16> = HashMap::new();
     let query = sqlx::query("SELECT oid, typlen FROM pg_type");
     match query.fetch_all(postgres_pool).await {
