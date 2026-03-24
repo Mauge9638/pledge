@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::{io, sync::Arc};
 
 use sqlx::error::{DatabaseError, Error};
+use sqlx::postgres::types::Oid;
 use sqlx::{PgPool, Row, postgres::PgRow};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -11,34 +13,46 @@ use messages::{
 };
 use messages::{Decode, RowDescription};
 
+use crate::wire::messages::ErrorResponseSeverity;
+
 mod messages;
 pub mod types;
 
 pub async fn listener_start(listener: TcpListener, postgres_pool: Arc<PgPool>) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, ip)) => {
-                let pool = postgres_pool.clone();
-                tokio::spawn(async move {
-                    println!(
-                        "Accepted connection from {:?} on ip {:?}",
-                        stream.peer_addr(),
-                        ip
-                    );
-                    handle_connection(stream, &pool).await
-                })
-            }
-            Err(err) => tokio::spawn(async move {
-                eprintln!("Failed to accept connection: {}", err);
-            }),
-        };
+    if let Ok(types) = get_pg_type_lens(&postgres_pool).await {
+        let pg_type_lens = Arc::new(types);
+        loop {
+            match listener.accept().await {
+                Ok((stream, ip)) => {
+                    let pool = postgres_pool.clone();
+                    let type_lens = pg_type_lens.clone();
+                    tokio::spawn(async move {
+                        println!(
+                            "Accepted connection from {:?} on ip {:?}",
+                            stream.peer_addr(),
+                            ip
+                        );
+                        handle_connection(stream, &pool, &type_lens).await
+                    })
+                }
+                Err(err) => tokio::spawn(async move {
+                    eprintln!("Failed to accept connection: {}", err);
+                }),
+            };
+        }
+    } else {
+        eprintln!("Failed to get pg_type.typlen");
     }
 }
 
-async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
+async fn handle_connection(
+    stream: TcpStream,
+    postgres_pool: &PgPool,
+    pg_type_lens: &HashMap<u32, i16>,
+) {
     let mut state = WireProtocolStates::WaitingForSSL;
     let mut command_tag: SQLCommand;
-    loop {
+    'mainloop: loop {
         let _ = stream.readable().await;
         let mut read_buffer = [0u8; 10024];
 
@@ -57,7 +71,9 @@ async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
                         let response = b"N";
                         match stream_try_write(&stream, response).await {
                             Some(_) => state = WireProtocolStates::WaitingForStartup,
-                            None => {}
+                            None => {
+                                break 'mainloop;
+                            }
                         };
                     }
                     WireProtocolStates::WaitingForStartup => {
@@ -66,46 +82,103 @@ async fn handle_connection(stream: TcpStream, postgres_pool: &PgPool) {
                         let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
                         match stream_try_write(&stream, &ready_for_query).await {
                             Some(_) => state = WireProtocolStates::ReadyForQuery,
-                            None => {}
+                            None => {
+                                break 'mainloop;
+                            }
                         }
                     }
                     WireProtocolStates::ReadyForQuery => {
-                        let query_string = Query {
+                        let message_type_byte = read_buffer[0];
+                        if message_type_byte == b'X' {
+                            break 'mainloop;
+                        }
+                        match (Query {
                             bytes: read_buffer[..n].to_vec(),
                         }
-                        .decode();
-                        command_tag = match command_tag_from_query_str(&query_string) {
-                            Some(tag) => tag,
-                            None => return,
-                        };
-                        println!("Decoded query: {}", query_string);
-                        match execute_query(&query_string, postgres_pool).await {
-                            Ok(results) => {
-                                if let Some(bytes) = create_response_bytes(results, &command_tag) {
-                                    stream_try_write(&stream, &bytes).await;
-                                }
+                        .decode())
+                        {
+                            Ok(query_string) => {
+                                match command_tag_from_query_str(&query_string) {
+                                    Some(command_tag) => {
+                                        println!("Decoded query: {}", query_string);
+                                        match execute_query(&query_string, postgres_pool).await {
+                                            Ok(results) => {
+                                                if let Some(bytes) = create_response_bytes(
+                                                    results,
+                                                    &command_tag,
+                                                    pg_type_lens,
+                                                ) {
+                                                    stream_try_write(&stream, &bytes).await;
+                                                }
+                                            }
+                                            Err(err) => {
+                                                stream_try_write(
+                                                    &stream,
+                                                    &create_error_message(
+                                                        ErrorResponseSeverity::Error,
+                                                        err,
+                                                    ),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        let ready_for_query =
+                                            &ReadyForQuery { status: b'I' }.encode();
+                                        stream_try_write(&stream, &ready_for_query).await;
+                                    }
+                                    None => {
+                                        stream_try_write(
+                                            &stream,
+                                            &ErrorResponse {
+                                                severity: ErrorResponseSeverity::Error,
+                                                error_message:
+                                                    "error while creating command tag from query, is your query malformed or incomplete?"
+                                                        .to_string(),
+                                                sql_state_code: "XX000".to_string(),
+                                            }
+                                            .encode(),
+                                        )
+                                        .await;
+                                        let ready_for_query =
+                                            &ReadyForQuery { status: b'I' }.encode();
+                                        stream_try_write(&stream, &ready_for_query).await;
+                                    }
+                                };
                             }
                             Err(err) => {
-                                stream_try_write(&stream, &create_error_message(err)).await;
+                                stream_try_write(
+                                    &stream,
+                                    &ErrorResponse {
+                                        severity: ErrorResponseSeverity::Error,
+                                        error_message: err.to_string(),
+                                        sql_state_code: "XX000".to_string(),
+                                    }
+                                    .encode(),
+                                )
+                                .await;
+                                let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
+                                stream_try_write(&stream, &ready_for_query).await;
                             }
                         }
-
-                        // if let Ok(results) = execute_query(&query_string, postgres_pool).await {
-                        //     if let Some(bytes) = create_response_bytes(results, &command_tag) {
-                        //         stream_try_write(&stream, &bytes).await;
-                        //     }
-                        // }
-                        let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                        stream_try_write(&stream, &ready_for_query).await;
                     }
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 continue;
             }
-            Err(e) => {
-                eprintln!("Error occured: {}", e);
-                return;
+            Err(err) => {
+                eprintln!("Error occured: {}", err);
+                stream_try_write(
+                    &stream,
+                    &ErrorResponse {
+                        severity: ErrorResponseSeverity::Fatal,
+                        error_message: err.to_string(),
+                        sql_state_code: "XX000".to_string(),
+                    }
+                    .encode(),
+                )
+                .await;
+                break 'mainloop;
             }
         }
     }
@@ -122,13 +195,23 @@ async fn execute_query(query_string: &str, pool: &PgPool) -> Result<Vec<PgRow>, 
     }
 }
 
-fn create_response_bytes(query_results: Vec<PgRow>, command_tag: &SQLCommand) -> Option<Vec<u8>> {
+fn create_response_bytes(
+    query_results: Vec<PgRow>,
+    command_tag: &SQLCommand,
+    pg_type_lens: &HashMap<u32, i16>,
+) -> Option<Vec<u8>> {
     let columns = match query_results.first() {
         Some(row) => row.columns(),
         None => return None,
     };
     let mut response: Vec<u8> = Vec::new();
-    response.extend(RowDescription { columns: columns }.encode());
+    response.extend(
+        RowDescription {
+            columns: columns,
+            type_lens: pg_type_lens,
+        }
+        .encode(),
+    );
     for row in &query_results {
         response.extend(DataRow { row: row }.encode());
     }
@@ -146,7 +229,7 @@ fn create_response_bytes(query_results: Vec<PgRow>, command_tag: &SQLCommand) ->
 
 fn command_tag_from_query_str(query: &str) -> Option<SQLCommand> {
     let split = query.split(" ").collect::<Vec<&str>>();
-    let (first, second, third) = (split[0], split[1], split[2]);
+    let first = split[0];
     match first {
         "SELECT" => Some(SQLCommand::Select),
         "INSERT" => Some(SQLCommand::Insert),
@@ -157,7 +240,8 @@ fn command_tag_from_query_str(query: &str) -> Option<SQLCommand> {
         "FETCH" => Some(SQLCommand::Fetch),
         "COPY" => Some(SQLCommand::Copy),
         "CREATE" => {
-            if second == "TABLE" && third == "AS" {
+            let (second, third) = (split.get(1), split.get(2));
+            if second.unwrap_or(&&"") == &"TABLE" && third.unwrap_or(&&"") == &"AS" {
                 Some(SQLCommand::CreateTableAs)
             } else {
                 None
@@ -174,8 +258,8 @@ async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
         match stream.try_write(&buf[written..]) {
             Ok(n) => written += n,
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) => {
-                eprintln!("Error occurred: {}", e);
+            Err(err) => {
+                eprintln!("Error occurred: {}", err);
                 return None;
             }
         }
@@ -183,7 +267,7 @@ async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
     Some(written)
 }
 
-fn create_error_message<'a>(err: sqlx::Error) -> Vec<u8> {
+fn create_error_message(severity: ErrorResponseSeverity, err: sqlx::Error) -> Vec<u8> {
     let error_message: String;
     let sql_state_code: String;
     match err.as_database_error() {
@@ -201,10 +285,28 @@ fn create_error_message<'a>(err: sqlx::Error) -> Vec<u8> {
     }
 
     let error = ErrorResponse {
+        severity: severity,
         error_message: error_message,
         sql_state_code: sql_state_code,
     }
     .encode();
 
     error
+}
+
+async fn get_pg_type_lens(postgres_pool: &PgPool) -> Result<HashMap<u32, i16>, Error> {
+    let mut type_lens_hashmap: HashMap<u32, i16> = HashMap::new();
+    let query = sqlx::query("SELECT oid, typlen FROM pg_type");
+    match query.fetch_all(postgres_pool).await {
+        Ok(response) => {
+            for row in response {
+                type_lens_hashmap.insert(row.get::<Oid, _>(0).0, row.get(1));
+            }
+        }
+        Err(err) => {
+            println!("{}", err);
+            return Err(err);
+        }
+    };
+    Ok(type_lens_hashmap)
 }

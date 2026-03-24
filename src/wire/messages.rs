@@ -1,3 +1,5 @@
+use std::{collections::HashMap, fmt::Display, string::FromUtf8Error};
+
 use bytes::{BufMut, BytesMut};
 use sqlx::{
     Column, Row, TypeInfo,
@@ -17,7 +19,7 @@ pub(super) trait Encode {
 }
 
 pub(super) trait Decode {
-    fn decode(&self) -> String;
+    fn decode(&self) -> Result<String, FromUtf8Error>;
 }
 
 pub(super) struct AuthenticationOk;
@@ -46,6 +48,7 @@ impl Encode for ReadyForQuery {
 
 pub(super) struct RowDescription<'a> {
     pub(super) columns: &'a [PgColumn],
+    pub(super) type_lens: &'a HashMap<u32, i16>,
 }
 impl Encode for RowDescription<'_> {
     fn encode(&self) -> Vec<u8> {
@@ -63,12 +66,16 @@ impl Encode for RowDescription<'_> {
                 Some(oid) => oid.0 as i32,
                 None => 0,
             };
+            let type_len = match self.type_lens.get(&(type_oid as u32)) {
+                Some(&type_len) => type_len,
+                None => -2,
+            };
             payload.put(column.name().as_bytes()); // Name
             payload.put_u8(0); // null terminator
             payload.put_i32(table_oid); // table OID
             payload.put_i16(attribute_number); // attribute number
             payload.put_i32(type_oid); // type OID
-            payload.put_i16(type_name_to_size(column.type_info().name())); // type size, this should be improved upon
+            payload.put_i16(type_len); // type size, this should be improved upon
             payload.put_i32(-1); //type modifier, -1 is a temporary workaround
             payload.put_i16(0); // format code, 0 = text, 1 = binary
         }
@@ -86,7 +93,6 @@ pub(super) struct DataRow<'a> {
 impl Encode for DataRow<'_> {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
-
         for index in 0..(self.row.columns().len()) {
             let row_value = match self.row.try_get_raw(index) {
                 Ok(pg_value_ref) => match pg_value_ref.as_bytes() {
@@ -148,7 +154,34 @@ impl CommandComplete<'_> {
     }
 }
 
+pub(super) enum ErrorResponseSeverity {
+    Error,
+    Fatal,
+    Panic,
+    Warning,
+    Notice,
+    Debug,
+    Info,
+    Log,
+}
+
+impl Display for ErrorResponseSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorResponseSeverity::Error => write!(f, "ERROR"),
+            ErrorResponseSeverity::Fatal => write!(f, "FATAL"),
+            ErrorResponseSeverity::Panic => write!(f, "PANIC"),
+            ErrorResponseSeverity::Warning => write!(f, "WARNING"),
+            ErrorResponseSeverity::Notice => write!(f, "NOTICE"),
+            ErrorResponseSeverity::Debug => write!(f, "DEBUG"),
+            ErrorResponseSeverity::Info => write!(f, "INFO"),
+            ErrorResponseSeverity::Log => write!(f, "LOG"),
+        }
+    }
+}
+
 pub(super) struct ErrorResponse {
+    pub(super) severity: ErrorResponseSeverity,
     pub(super) error_message: String,
     pub(super) sql_state_code: String,
 }
@@ -156,10 +189,24 @@ pub(super) struct ErrorResponse {
 impl Encode for ErrorResponse {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
+        payload.put_u8(b'S');
+        payload.put(self.severity.to_string().as_bytes());
+        payload.put_u8(0);
+        payload.put_u8(b'V');
+        payload.put(self.severity.to_string().as_bytes());
+        payload.put_u8(0);
+        payload.put_u8(b'C');
+        payload.put(self.sql_state_code.as_bytes());
+        payload.put_u8(0);
+        payload.put_u8(b'M');
+        payload.put(self.error_message.as_bytes());
+        payload.put_u8(0);
+        payload.put_u8(0); // Signals no more fields
 
         let mut bytes = BytesMut::new();
         bytes.put_u8(b'E');
-
+        bytes.put_i32((payload.len() + 4) as i32); // Length of message
+        bytes.put(payload);
         bytes.to_vec()
     }
 }
@@ -169,19 +216,10 @@ pub(super) struct Query {
     pub(super) bytes: Vec<u8>,
 }
 impl Decode for Query {
-    fn decode(&self) -> String {
+    fn decode(&self) -> Result<String, FromUtf8Error> {
         let payload = self.bytes[5..self.bytes.len() - 1].to_vec();
-        String::from_utf8(payload).unwrap()
+        String::from_utf8(payload)
     }
 }
 
 // Helpers
-
-fn type_name_to_size(type_name: &str) -> i16 {
-    match type_name.to_lowercase().as_str() {
-        "int4" => 4,
-        "text" => -1,
-        "varchar" => -1,
-        _ => 1,
-    }
-}
