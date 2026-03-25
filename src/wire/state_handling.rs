@@ -6,13 +6,9 @@ use crate::{
         WireProtocolStates,
     },
 };
-use sqlx::{
-    PgPool, Row,
-    error::{DatabaseError, Error},
-    postgres::{PgRow, types::Oid},
-};
+use sqlx::{Row, postgres::PgRow};
 use std::io;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 pub(super) async fn waiting_for_ssl(stream: &TcpStream) -> Result<WireProtocolStates, String> {
     let response = b"N";

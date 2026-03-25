@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display, string::FromUtf8Error};
 
 use bytes::{BufMut, BytesMut};
 use sqlx::{
-    Column, Row, TypeInfo,
+    Column, Row,
     postgres::{PgColumn, PgRow},
 };
 

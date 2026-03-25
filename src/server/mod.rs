@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::{io, sync::Arc};
+use std::io;
 
-use sqlx::error::{DatabaseError, Error};
+use sqlx::error::Error;
 use sqlx::postgres::types::Oid;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Row};
 use tokio::net::{TcpListener, TcpStream};
 
 use types::{SQLCommand, WireProtocolStates};
