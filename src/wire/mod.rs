@@ -15,9 +15,13 @@ use messages::{Decode, RowDescription};
 
 use crate::AppState;
 use crate::wire::messages::ErrorResponseSeverity;
+use crate::wire::state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
 
 mod messages;
+mod state_handling;
 pub mod types;
+
+pub(super) type ReadBuffer = [u8; 10024];
 
 pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
     loop {
@@ -44,7 +48,7 @@ async fn handle_connection(stream: TcpStream, app_state: &AppState) {
     let mut state = WireProtocolStates::WaitingForSSL;
     'mainloop: loop {
         let _ = stream.readable().await;
-        let mut read_buffer = [0u8; 10024];
+        let mut read_buffer: ReadBuffer = [0u8; 10024];
 
         match stream.try_read(&mut read_buffer) {
             Ok(0) => break,
@@ -58,96 +62,22 @@ async fn handle_connection(stream: TcpStream, app_state: &AppState) {
 
                 match state {
                     WireProtocolStates::WaitingForSSL => {
-                        let response = b"N";
-                        match stream_try_write(&stream, response).await {
-                            Some(_) => state = WireProtocolStates::WaitingForStartup,
-                            None => {
-                                break 'mainloop;
-                            }
+                        match waiting_for_ssl(&stream).await {
+                            Ok(new_state) => state = new_state,
+                            Err(_) => break 'mainloop,
                         };
                     }
                     WireProtocolStates::WaitingForStartup => {
-                        let auth_ok = &AuthenticationOk.encode();
-                        stream_try_write(&stream, &auth_ok).await;
-                        let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                        match stream_try_write(&stream, &ready_for_query).await {
-                            Some(_) => state = WireProtocolStates::ReadyForQuery,
-                            None => {
-                                break 'mainloop;
-                            }
+                        match waiting_for_startup(&stream).await {
+                            Ok(new_state) => state = new_state,
+                            Err(_) => break 'mainloop,
                         }
                     }
                     WireProtocolStates::ReadyForQuery => {
-                        let message_type_byte = read_buffer[0];
-                        if message_type_byte == b'X' {
-                            break 'mainloop;
-                        }
-                        match (Query {
-                            bytes: read_buffer[..n].to_vec(),
-                        }
-                        .decode())
-                        {
-                            Ok(query_string) => {
-                                match command_tag_from_query_str(&query_string) {
-                                    Some(command_tag) => {
-                                        println!("Decoded query: {}", query_string);
-                                        match execute_query(&query_string, &app_state).await {
-                                            Ok(results) => {
-                                                if let Some(bytes) = create_response_bytes(
-                                                    results,
-                                                    &command_tag,
-                                                    &app_state,
-                                                ) {
-                                                    stream_try_write(&stream, &bytes).await;
-                                                }
-                                            }
-                                            Err(err) => {
-                                                stream_try_write(
-                                                    &stream,
-                                                    &create_error_message(
-                                                        ErrorResponseSeverity::Error,
-                                                        err,
-                                                    ),
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        let ready_for_query =
-                                            &ReadyForQuery { status: b'I' }.encode();
-                                        stream_try_write(&stream, &ready_for_query).await;
-                                    }
-                                    None => {
-                                        stream_try_write(
-                                            &stream,
-                                            &ErrorResponse {
-                                                severity: ErrorResponseSeverity::Error,
-                                                error_message:
-                                                    "error while creating command tag from query, is your query malformed or incomplete?"
-                                                        .to_string(),
-                                                sql_state_code: "XX000".to_string(),
-                                            }
-                                            .encode(),
-                                        )
-                                        .await;
-                                        let ready_for_query =
-                                            &ReadyForQuery { status: b'I' }.encode();
-                                        stream_try_write(&stream, &ready_for_query).await;
-                                    }
-                                };
-                            }
-                            Err(err) => {
-                                stream_try_write(
-                                    &stream,
-                                    &ErrorResponse {
-                                        severity: ErrorResponseSeverity::Error,
-                                        error_message: err.to_string(),
-                                        sql_state_code: "XX000".to_string(),
-                                    }
-                                    .encode(),
-                                )
-                                .await;
-                                let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                                stream_try_write(&stream, &ready_for_query).await;
+                        match ready_for_query(read_buffer, n, &stream, app_state).await {
+                            Ok(_) => {}
+                            Err(_) => {
+                                break 'mainloop;
                             }
                         }
                     }
@@ -158,7 +88,7 @@ async fn handle_connection(stream: TcpStream, app_state: &AppState) {
             }
             Err(err) => {
                 eprintln!("Error occured: {}", err);
-                stream_try_write(
+                state_handling::stream_try_write(
                     &stream,
                     &ErrorResponse {
                         severity: ErrorResponseSeverity::Fatal,
@@ -172,119 +102,6 @@ async fn handle_connection(stream: TcpStream, app_state: &AppState) {
             }
         }
     }
-}
-
-async fn execute_query(
-    query_string: &str,
-    app_state: &AppState,
-) -> Result<Vec<PgRow>, sqlx::Error> {
-    let query = sqlx::query(&query_string);
-    match query.fetch_all(app_state.pool.as_ref()).await {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            eprintln!("Error occurred: {}", err);
-            Err(err)
-        }
-    }
-}
-
-fn create_response_bytes(
-    query_results: Vec<PgRow>,
-    command_tag: &SQLCommand,
-    app_state: &AppState,
-) -> Option<Vec<u8>> {
-    let columns = match query_results.first() {
-        Some(row) => row.columns(),
-        None => return None,
-    };
-    let mut response: Vec<u8> = Vec::new();
-    response.extend(
-        RowDescription {
-            columns: columns,
-            type_lens: &app_state.pg_type_lens,
-        }
-        .encode(),
-    );
-    for row in &query_results {
-        response.extend(DataRow { row: row }.encode());
-    }
-    response.extend(
-        CommandComplete {
-            rows: query_results.len() as u16,
-            command_tag: command_tag,
-        }
-        .encode(),
-    );
-
-    println!("----------------------\nCOMMAND COMPLETE\n----------------------");
-    Some(response)
-}
-
-fn command_tag_from_query_str(query: &str) -> Option<SQLCommand> {
-    let split = query.split(" ").collect::<Vec<&str>>();
-    let first = split[0];
-    match first {
-        "SELECT" => Some(SQLCommand::Select),
-        "INSERT" => Some(SQLCommand::Insert),
-        "UPDATE" => Some(SQLCommand::Update),
-        "DELETE" => Some(SQLCommand::Delete),
-        "MERGE" => Some(SQLCommand::Merge),
-        "MOVE" => Some(SQLCommand::Move),
-        "FETCH" => Some(SQLCommand::Fetch),
-        "COPY" => Some(SQLCommand::Copy),
-        "CREATE" => {
-            let (second, third) = (split.get(1), split.get(2));
-            if second.unwrap_or(&&"") == &"TABLE" && third.unwrap_or(&&"") == &"AS" {
-                Some(SQLCommand::CreateTableAs)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-async fn stream_try_write(stream: &TcpStream, buf: &[u8]) -> Option<usize> {
-    let mut written = 0;
-    while written < buf.len() {
-        stream.writable().await.ok()?;
-        match stream.try_write(&buf[written..]) {
-            Ok(n) => written += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(err) => {
-                eprintln!("Error occurred: {}", err);
-                return None;
-            }
-        }
-    }
-    Some(written)
-}
-
-fn create_error_message(severity: ErrorResponseSeverity, err: sqlx::Error) -> Vec<u8> {
-    let error_message: String;
-    let sql_state_code: String;
-    match err.as_database_error() {
-        Some(err) => {
-            error_message = err.message().to_string();
-            match err.code() {
-                Some(code) => sql_state_code = code.to_string(),
-                None => sql_state_code = "XX000".to_string(), // Pledge undefined error
-            }
-        }
-        None => {
-            error_message = "Unknown error".to_string();
-            sql_state_code = "XX000".to_string(); // Pledge undefined error
-        }
-    }
-
-    let error = ErrorResponse {
-        severity: severity,
-        error_message: error_message,
-        sql_state_code: sql_state_code,
-    }
-    .encode();
-
-    error
 }
 
 pub async fn get_pg_type_lens(postgres_pool: &PgPool) -> Result<HashMap<u32, i16>, Error> {
