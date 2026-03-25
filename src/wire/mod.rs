@@ -16,6 +16,7 @@ use messages::{Decode, RowDescription};
 use crate::AppState;
 use crate::wire::messages::ErrorResponseSeverity;
 use crate::wire::state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
+use crate::wire::types::ProtocolState;
 
 mod messages;
 mod state_handling;
@@ -25,56 +26,59 @@ pub(super) type ReadBuffer = [u8; 10024];
 
 pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
     loop {
+        let state = app_state.clone();
         match listener.accept().await {
-            Ok((stream, ip)) => {
-                let state = app_state.clone();
-                tokio::spawn(async move {
-                    println!(
-                        "Accepted connection from {:?} on ip {:?}",
-                        stream.peer_addr(),
-                        ip
-                    );
-                    handle_connection(stream, &state).await
-                })
-            }
+            Ok((stream, ip)) => tokio::spawn(async move {
+                println!(
+                    "Accepted connection from {:?} on ip {:?}",
+                    stream.peer_addr(),
+                    ip
+                );
+                handle_connection(stream, &state).await
+            }),
             Err(err) => tokio::spawn(async move {
                 eprintln!("Failed to accept connection: {}", err);
             }),
         };
     }
 }
-
 async fn handle_connection(stream: TcpStream, app_state: &AppState) {
-    let mut state = WireProtocolStates::WaitingForSSL;
+    let mut protocol_state = ProtocolState {
+        stream: stream,
+        app_state: app_state.clone(),
+        state: WireProtocolStates::WaitingForSSL,
+        read_buffer: [0u8; 10024],
+    };
     'mainloop: loop {
-        let _ = stream.readable().await;
-        let mut read_buffer: ReadBuffer = [0u8; 10024];
-
-        match stream.try_read(&mut read_buffer) {
+        let _ = protocol_state.stream.readable().await;
+        match protocol_state
+            .stream
+            .try_read(&mut protocol_state.read_buffer)
+        {
             Ok(0) => break,
             Ok(n) => {
                 println!(
                     "----------------------\nRECEIVED (STATE: {:?})\nbyte length: {}\nraw content {:?}\n----------------------\n",
-                    state,
+                    protocol_state.state,
                     n,
-                    &read_buffer[..n]
+                    &protocol_state.read_buffer[..n]
                 );
 
-                match state {
+                match protocol_state.state {
                     WireProtocolStates::WaitingForSSL => {
-                        match waiting_for_ssl(&stream).await {
-                            Ok(new_state) => state = new_state,
+                        match waiting_for_ssl(&protocol_state).await {
+                            Ok(new_state) => protocol_state.state = new_state,
                             Err(_) => break 'mainloop,
                         };
                     }
                     WireProtocolStates::WaitingForStartup => {
-                        match waiting_for_startup(&stream).await {
-                            Ok(new_state) => state = new_state,
+                        match waiting_for_startup(&protocol_state).await {
+                            Ok(new_state) => protocol_state.state = new_state,
                             Err(_) => break 'mainloop,
                         }
                     }
                     WireProtocolStates::ReadyForQuery => {
-                        match ready_for_query(read_buffer, n, &stream, app_state).await {
+                        match ready_for_query(n, &protocol_state).await {
                             Ok(_) => {}
                             Err(_) => {
                                 break 'mainloop;
@@ -89,7 +93,7 @@ async fn handle_connection(stream: TcpStream, app_state: &AppState) {
             Err(err) => {
                 eprintln!("Error occured: {}", err);
                 state_handling::stream_try_write(
-                    &stream,
+                    &protocol_state.stream,
                     &ErrorResponse {
                         severity: ErrorResponseSeverity::Fatal,
                         error_message: err.to_string(),

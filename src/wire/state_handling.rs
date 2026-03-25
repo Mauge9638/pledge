@@ -2,42 +2,44 @@ use crate::{
     AppState,
     wire::{
         AuthenticationOk, CommandComplete, DataRow, Decode, Encode, ErrorResponse,
-        ErrorResponseSeverity, Query, ReadBuffer, ReadyForQuery, RowDescription, SQLCommand,
-        WireProtocolStates,
+        ErrorResponseSeverity, ProtocolState, Query, ReadBuffer, ReadyForQuery, RowDescription,
+        SQLCommand, WireProtocolStates,
     },
 };
 use sqlx::{Row, postgres::PgRow};
 use std::io;
 use tokio::net::TcpStream;
 
-pub(super) async fn waiting_for_ssl(stream: &TcpStream) -> Result<WireProtocolStates, String> {
+pub(super) async fn waiting_for_ssl(
+    protocol_state: &ProtocolState,
+) -> Result<WireProtocolStates, String> {
     let response = b"N";
-    match stream_try_write(&stream, response).await {
+    match stream_try_write(&protocol_state.stream, response).await {
         Some(_) => Ok(WireProtocolStates::WaitingForStartup),
         None => Err("failed to write SSL response".to_string()),
     }
 }
-pub(super) async fn waiting_for_startup(stream: &TcpStream) -> Result<WireProtocolStates, String> {
+pub(super) async fn waiting_for_startup(
+    protocol_state: &ProtocolState,
+) -> Result<WireProtocolStates, String> {
     let auth_ok = &AuthenticationOk.encode();
-    stream_try_write(&stream, &auth_ok).await;
+    stream_try_write(&protocol_state.stream, &auth_ok).await;
     let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-    match stream_try_write(&stream, &ready_for_query).await {
+    match stream_try_write(&protocol_state.stream, &ready_for_query).await {
         Some(_) => Ok(WireProtocolStates::ReadyForQuery),
         None => Err("failed to write auth ok response".to_string()),
     }
 }
 pub(super) async fn ready_for_query(
-    read_buffer: ReadBuffer,
     buffer_length: usize,
-    stream: &TcpStream,
-    app_state: &AppState,
+    protocol_state: &ProtocolState,
 ) -> Result<bool, String> {
-    let message_type_byte = read_buffer[0];
+    let message_type_byte = protocol_state.read_buffer[0];
     if message_type_byte == b'X' {
         return Err("Client sent terminate message".to_string());
     }
     match (Query {
-        bytes: read_buffer[..buffer_length].to_vec(),
+        bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
     }
     .decode())
     {
@@ -45,28 +47,30 @@ pub(super) async fn ready_for_query(
             match command_tag_from_query_str(&query_string) {
                 Some(command_tag) => {
                     println!("Decoded query: {}", query_string);
-                    match execute_query(&query_string, &app_state).await {
+                    match execute_query(&query_string, &protocol_state.app_state).await {
                         Ok(results) => {
-                            if let Some(bytes) =
-                                create_response_bytes(results, &command_tag, &app_state)
-                            {
-                                stream_try_write(&stream, &bytes).await;
+                            if let Some(bytes) = create_response_bytes(
+                                results,
+                                &command_tag,
+                                &protocol_state.app_state,
+                            ) {
+                                stream_try_write(&protocol_state.stream, &bytes).await;
                             }
                         }
                         Err(err) => {
                             stream_try_write(
-                                &stream,
+                                &protocol_state.stream,
                                 &create_error_message(ErrorResponseSeverity::Error, err),
                             )
                             .await;
                         }
                     }
                     let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                    stream_try_write(&stream, &ready_for_query).await;
+                    stream_try_write(&protocol_state.stream, &ready_for_query).await;
                 }
                 None => {
                     stream_try_write(
-                        &stream,
+                        &protocol_state.stream,
                         &ErrorResponse {
                             severity: ErrorResponseSeverity::Error,
                             error_message:
@@ -78,14 +82,14 @@ pub(super) async fn ready_for_query(
                     )
                     .await;
                     let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-                    stream_try_write(&stream, &ready_for_query).await;
+                    stream_try_write(&protocol_state.stream, &ready_for_query).await;
                 }
             };
             Ok(true)
         }
         Err(err) => {
             stream_try_write(
-                &stream,
+                &protocol_state.stream,
                 &ErrorResponse {
                     severity: ErrorResponseSeverity::Error,
                     error_message: err.to_string(),
@@ -95,7 +99,7 @@ pub(super) async fn ready_for_query(
             )
             .await;
             let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
-            stream_try_write(&stream, &ready_for_query).await;
+            stream_try_write(&protocol_state.stream, &ready_for_query).await;
             Ok(true)
         }
     }

@@ -1,3 +1,7 @@
+use tokio::net::TcpStream;
+
+use crate::{AppState, wire::ReadBuffer};
+
 #[derive(Debug)]
 pub(super) enum WireProtocolStates {
     WaitingForSSL,
@@ -15,4 +19,11 @@ pub(super) enum SQLCommand {
     Move,
     Fetch,
     Copy,
+}
+
+pub(super) struct ProtocolState {
+    pub stream: TcpStream,
+    pub app_state: AppState,
+    pub state: WireProtocolStates,
+    pub read_buffer: ReadBuffer,
 }
