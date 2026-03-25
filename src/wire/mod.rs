@@ -34,7 +34,7 @@ pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
                     stream.peer_addr(),
                     ip
                 );
-                handle_connection(stream, &state).await
+                handle_connection(stream, state).await
             }),
             Err(err) => tokio::spawn(async move {
                 eprintln!("Failed to accept connection: {}", err);
@@ -42,10 +42,10 @@ pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
         };
     }
 }
-async fn handle_connection(stream: TcpStream, app_state: &AppState) {
+async fn handle_connection(stream: TcpStream, app_state: AppState) {
     let mut protocol_state = ProtocolState {
         stream: stream,
-        app_state: app_state.clone(),
+        app_state: app_state,
         state: WireProtocolStates::WaitingForSSL,
         read_buffer: [0u8; 10024],
     };
