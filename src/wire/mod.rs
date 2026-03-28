@@ -16,7 +16,7 @@ use messages::{Decode, RowDescription};
 use crate::AppState;
 use crate::wire::messages::ErrorResponseSeverity;
 use crate::wire::state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
-use crate::wire::types::ProtocolState;
+use crate::wire::types::{ProtocolState, StateHandlingResult};
 
 mod messages;
 mod state_handling;
@@ -67,20 +67,28 @@ async fn handle_connection(stream: TcpStream, app_state: AppState) {
                 match protocol_state.state {
                     WireProtocolStates::WaitingForSSL => {
                         match waiting_for_ssl(&protocol_state).await {
-                            Ok(new_state) => protocol_state.state = new_state,
-                            Err(_) => break 'mainloop,
+                            StateHandlingResult::Continue(new_state) => {
+                                protocol_state.state = new_state
+                            }
+                            StateHandlingResult::Break(_) | StateHandlingResult::Error(_) => {
+                                break 'mainloop;
+                            }
                         };
                     }
                     WireProtocolStates::WaitingForStartup => {
                         match waiting_for_startup(&protocol_state).await {
-                            Ok(new_state) => protocol_state.state = new_state,
-                            Err(_) => break 'mainloop,
+                            StateHandlingResult::Continue(new_state) => {
+                                protocol_state.state = new_state
+                            }
+                            StateHandlingResult::Break(_) | StateHandlingResult::Error(_) => {
+                                break 'mainloop;
+                            }
                         }
                     }
                     WireProtocolStates::ReadyForQuery => {
                         match ready_for_query(n, &protocol_state).await {
-                            Ok(_) => {}
-                            Err(_) => {
+                            StateHandlingResult::Continue(_) => {}
+                            StateHandlingResult::Break(_) | StateHandlingResult::Error(_) => {
                                 break 'mainloop;
                             }
                         }

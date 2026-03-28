@@ -27,3 +27,9 @@ pub(super) struct ProtocolState {
     pub state: WireProtocolStates,
     pub read_buffer: ReadBuffer,
 }
+
+pub(super) enum StateHandlingResult {
+    Continue(WireProtocolStates),
+    Break(String),
+    Error(String),
+}

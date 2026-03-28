@@ -1,42 +1,40 @@
+use crate::cache::matcher::QueryMatcher;
+use crate::wire::types::StateHandlingResult;
 use crate::{
     AppState,
     wire::{
         AuthenticationOk, CommandComplete, DataRow, Decode, Encode, ErrorResponse,
-        ErrorResponseSeverity, ProtocolState, Query, ReadBuffer, ReadyForQuery, RowDescription,
-        SQLCommand, WireProtocolStates,
+        ErrorResponseSeverity, ProtocolState, Query, ReadyForQuery, RowDescription, SQLCommand,
+        WireProtocolStates,
     },
 };
 use sqlx::{Row, postgres::PgRow};
 use std::io;
 use tokio::net::TcpStream;
 
-pub(super) async fn waiting_for_ssl(
-    protocol_state: &ProtocolState,
-) -> Result<WireProtocolStates, String> {
+pub(super) async fn waiting_for_ssl(protocol_state: &ProtocolState) -> StateHandlingResult {
     let response = b"N";
     match stream_try_write(&protocol_state.stream, response).await {
-        Some(_) => Ok(WireProtocolStates::WaitingForStartup),
-        None => Err("failed to write SSL response".to_string()),
+        Some(_) => StateHandlingResult::Continue(WireProtocolStates::WaitingForStartup),
+        None => StateHandlingResult::Error("failed to write SSL response".to_string()),
     }
 }
-pub(super) async fn waiting_for_startup(
-    protocol_state: &ProtocolState,
-) -> Result<WireProtocolStates, String> {
+pub(super) async fn waiting_for_startup(protocol_state: &ProtocolState) -> StateHandlingResult {
     let auth_ok = &AuthenticationOk.encode();
     stream_try_write(&protocol_state.stream, &auth_ok).await;
     let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
     match stream_try_write(&protocol_state.stream, &ready_for_query).await {
-        Some(_) => Ok(WireProtocolStates::ReadyForQuery),
-        None => Err("failed to write auth ok response".to_string()),
+        Some(_) => StateHandlingResult::Continue(WireProtocolStates::ReadyForQuery),
+        None => StateHandlingResult::Error("failed to write auth ok response".to_string()),
     }
 }
 pub(super) async fn ready_for_query(
     buffer_length: usize,
     protocol_state: &ProtocolState,
-) -> Result<bool, String> {
+) -> StateHandlingResult {
     let message_type_byte = protocol_state.read_buffer[0];
     if message_type_byte == b'X' {
-        return Err("Client sent terminate message".to_string());
+        StateHandlingResult::Break("client sent terminate message".to_string());
     }
     match (Query {
         bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
@@ -85,7 +83,7 @@ pub(super) async fn ready_for_query(
                     stream_try_write(&protocol_state.stream, &ready_for_query).await;
                 }
             };
-            Ok(true)
+            StateHandlingResult::Continue(WireProtocolStates::ReadyForQuery)
         }
         Err(err) => {
             stream_try_write(
@@ -100,7 +98,7 @@ pub(super) async fn ready_for_query(
             .await;
             let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
             stream_try_write(&protocol_state.stream, &ready_for_query).await;
-            Ok(true)
+            StateHandlingResult::Continue(WireProtocolStates::ReadyForQuery)
         }
     }
 }
@@ -216,4 +214,11 @@ fn create_error_message(severity: ErrorResponseSeverity, err: sqlx::Error) -> Ve
     .encode();
 
     error
+}
+
+fn get_from_cache(matcher: &QueryMatcher, query: &str) {
+    match matcher.find_template(query) {
+        Some(template) => {}
+        None => {}
+    }
 }
