@@ -1,4 +1,4 @@
-use crate::cache::matcher::QueryMatcher;
+use crate::cache::store::cache_key;
 use crate::wire::types::StateHandlingResult;
 use crate::{
     AppState,
@@ -10,6 +10,7 @@ use crate::{
 };
 use sqlx::{Row, postgres::PgRow};
 use std::io;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 
 pub(super) async fn waiting_for_ssl(protocol_state: &ProtocolState) -> StateHandlingResult {
@@ -34,7 +35,7 @@ pub(super) async fn ready_for_query(
 ) -> StateHandlingResult {
     let message_type_byte = protocol_state.read_buffer[0];
     if message_type_byte == b'X' {
-        StateHandlingResult::Break("client sent terminate message".to_string());
+        return StateHandlingResult::Break("client sent terminate message".to_string());
     }
     match (Query {
         bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
@@ -45,22 +46,30 @@ pub(super) async fn ready_for_query(
             match command_tag_from_query_str(&query_string) {
                 Some(command_tag) => {
                     println!("Decoded query: {}", query_string);
-                    match execute_query(&query_string, &protocol_state.app_state).await {
-                        Ok(results) => {
-                            if let Some(bytes) = create_response_bytes(
-                                results,
-                                &command_tag,
-                                &protocol_state.app_state,
-                            ) {
-                                stream_try_write(&protocol_state.stream, &bytes).await;
-                            }
+                    match get_from_cache(protocol_state, &query_string) {
+                        Some(cached_result) => {
+                            stream_try_write(&protocol_state.stream, &cached_result).await;
                         }
-                        Err(err) => {
-                            stream_try_write(
-                                &protocol_state.stream,
-                                &create_error_message(ErrorResponseSeverity::Error, err),
-                            )
-                            .await;
+                        None => {
+                            match execute_query(&query_string, &protocol_state.app_state).await {
+                                Ok(results) => {
+                                    if let Some(bytes) = create_response_bytes(
+                                        results,
+                                        &command_tag,
+                                        &protocol_state.app_state,
+                                    ) {
+                                        stream_try_write(&protocol_state.stream, &bytes).await;
+                                        set_in_cache(protocol_state, &query_string, bytes);
+                                    }
+                                }
+                                Err(err) => {
+                                    stream_try_write(
+                                        &protocol_state.stream,
+                                        &create_error_message(ErrorResponseSeverity::Error, err),
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                     }
                     let ready_for_query = &ReadyForQuery { status: b'I' }.encode();
@@ -216,9 +225,24 @@ fn create_error_message(severity: ErrorResponseSeverity, err: sqlx::Error) -> Ve
     error
 }
 
-fn get_from_cache(matcher: &QueryMatcher, query: &str) {
-    match matcher.find_template(query) {
-        Some(template) => {}
-        None => {}
+fn get_from_cache(protocol_state: &ProtocolState, query: &str) -> Option<Vec<u8>> {
+    if protocol_state.app_state.matcher.template_exists(query) {
+        let key = cache_key(query, &Vec::new());
+        return protocol_state.app_state.cache.get(&key);
+    }
+    None
+}
+
+fn set_in_cache(protocol_state: &ProtocolState, query: &str, result: Vec<u8>) {
+    if let Some(template) = protocol_state.app_state.matcher.find_template(query) {
+        let expiration = match template.ttl {
+            Some(ttl) => Instant::now() + Duration::from_secs(ttl),
+            None => Instant::now() + Duration::from_secs(protocol_state.app_state.global_ttl),
+        };
+        let key = cache_key(query, &Vec::new());
+        protocol_state
+            .app_state
+            .cache
+            .insert(key, result, expiration);
     }
 }
