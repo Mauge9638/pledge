@@ -26,16 +26,18 @@ pub(super) type ReadBuffer = [u8; 10024];
 
 pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
     loop {
-        let state = app_state.clone();
         match listener.accept().await {
-            Ok((stream, ip)) => tokio::spawn(async move {
-                println!(
-                    "Accepted connection from {:?} on ip {:?}",
-                    stream.peer_addr(),
-                    ip
-                );
-                handle_connection(stream, state).await
-            }),
+            Ok((stream, ip)) => {
+                let state = app_state.clone();
+                tokio::spawn(async move {
+                    println!(
+                        "Accepted connection from {:?} on ip {:?}",
+                        stream.peer_addr(),
+                        ip
+                    );
+                    handle_connection(stream, state).await
+                })
+            }
             Err(err) => tokio::spawn(async move {
                 eprintln!("Failed to accept connection: {}", err);
             }),
