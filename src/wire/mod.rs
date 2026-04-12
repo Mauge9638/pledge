@@ -19,6 +19,7 @@ use crate::wire::state_handling::{ready_for_query, waiting_for_ssl, waiting_for_
 use crate::wire::types::{ProtocolState, StateHandlingResult};
 
 mod messages;
+mod reader;
 mod state_handling;
 pub mod types;
 
@@ -63,7 +64,7 @@ async fn handle_connection(stream: TcpStream, app_state: AppState) {
                     "----------------------\nRECEIVED (STATE: {:?})\nbyte length: {}\nraw content {:?}\n----------------------\n",
                     protocol_state.state,
                     n,
-                    &protocol_state.read_buffer[..n]
+                    &protocol_state.read_buffer[..n],
                 );
 
                 match protocol_state.state {

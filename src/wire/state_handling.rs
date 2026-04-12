@@ -1,13 +1,13 @@
-use crate::cache::store::cache_key;
-use crate::wire::types::StateHandlingResult;
-use crate::{
-    AppState,
-    wire::{
-        AuthenticationOk, CommandComplete, DataRow, Decode, Encode, ErrorResponse,
-        ErrorResponseSeverity, ProtocolState, Query, ReadyForQuery, RowDescription, SQLCommand,
-        WireProtocolStates,
-    },
+use super::reader::ByteReader;
+use super::types::StateHandlingResult;
+use super::{
+    AuthenticationOk, CommandComplete, DataRow, Decode, Encode, ErrorResponse,
+    ErrorResponseSeverity, ProtocolState, Query, ReadyForQuery, RowDescription, SQLCommand,
+    WireProtocolStates,
 };
+use crate::AppState;
+use crate::cache::store::cache_key;
+use crate::wire::messages::Parse;
 use sqlx::{Row, postgres::PgRow};
 use std::io;
 use std::time::{Duration, Instant};
@@ -34,8 +34,26 @@ pub(super) async fn ready_for_query(
     protocol_state: &ProtocolState,
 ) -> StateHandlingResult {
     let message_type_byte = protocol_state.read_buffer[0];
+    ready_for_query_message_received(message_type_byte);
     if message_type_byte == b'X' {
         return StateHandlingResult::Break("client sent terminate message".to_string());
+    }
+    if message_type_byte == b'P' {
+        let parse = Parse {
+            bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
+        }
+        .decode();
+        // let cursor: usize = 5; // We don't want to read the message length
+        // let mut reader = ByteReader::new(&protocol_state.read_buffer[..buffer_length], cursor);
+        // loop {
+        //     match reader.read_cstring() {
+        //         Ok(string) => println!("-----\n{}\n-----", string),
+        //         Err(err) => {
+        //             println!("{}", err.message);
+        //             break;
+        //         }
+        //     }
+        // }
     }
     match (Query {
         bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
@@ -99,7 +117,7 @@ pub(super) async fn ready_for_query(
                 &protocol_state.stream,
                 &ErrorResponse {
                     severity: ErrorResponseSeverity::Error,
-                    error_message: err.to_string(),
+                    error_message: err.message,
                     sql_state_code: "XX000".to_string(),
                 }
                 .encode(),
@@ -117,6 +135,21 @@ async fn execute_query(
     app_state: &AppState,
 ) -> Result<Vec<PgRow>, sqlx::Error> {
     let query = sqlx::query(&query_string);
+    match query.fetch_all(app_state.pool.as_ref()).await {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            eprintln!("Error occurred: {}", err);
+            Err(err)
+        }
+    }
+}
+
+async fn execute_query_prepared(
+    query_string: &str,
+    params: Vec<String>,
+    app_state: &AppState,
+) -> Result<Vec<PgRow>, sqlx::Error> {
+    let query = sqlx::query(&query_string).bind(params);
     match query.fetch_all(app_state.pool.as_ref()).await {
         Ok(response) => Ok(response),
         Err(err) => {
@@ -244,5 +277,22 @@ fn set_in_cache(protocol_state: &ProtocolState, query: &str, result: Vec<u8>) {
             .app_state
             .cache
             .insert(key, result, expiration);
+    }
+}
+
+fn ready_for_query_message_received(identification_byte: u8) {
+    match identification_byte {
+        b'Q' => println!("Identification byte: 'Query'"), // Query
+        b'P' => println!("Identification byte: 'Parse'"), // Parse
+        b'B' => println!("Identification byte: 'Bind'"),  // Bind
+        b'E' => println!("Identification byte: 'Execute'"), // Execute
+        b'S' => println!("Identification byte: 'Sync'"),  // Sync
+        b'D' => println!("Identification byte: 'Describe'"), // Describe
+        b'C' => println!("Identification byte: 'Close'"), // Close
+        b'X' => println!("Identification byte: 'Terminate'"), // Terminate
+        _ => println!(
+            "Identification byte: 'Unknown byte {}'",
+            identification_byte
+        ),
     }
 }

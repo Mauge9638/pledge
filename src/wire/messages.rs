@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Display, string::FromUtf8Error};
 
+use super::reader::{ByteReader, ByteReaderError};
 use bytes::{BufMut, BytesMut};
 use sqlx::{
     Column, Row,
@@ -19,7 +20,8 @@ pub(super) trait Encode {
 }
 
 pub(super) trait Decode {
-    fn decode(&self) -> Result<String, FromUtf8Error>;
+    type Output;
+    fn decode(&self) -> Result<Self::Output, ByteReaderError>;
 }
 
 pub(super) struct AuthenticationOk;
@@ -50,7 +52,7 @@ pub(super) struct RowDescription<'a> {
     pub(super) columns: &'a [PgColumn],
     pub(super) type_lens: &'a HashMap<u32, i16>,
 }
-impl Encode for RowDescription<'_> {
+impl<'a> Encode for RowDescription<'a> {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
         for column in self.columns {
@@ -90,7 +92,7 @@ impl Encode for RowDescription<'_> {
 pub(super) struct DataRow<'a> {
     pub(super) row: &'a PgRow,
 }
-impl Encode for DataRow<'_> {
+impl<'a> Encode for DataRow<'a> {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
         for index in 0..(self.row.columns().len()) {
@@ -123,7 +125,7 @@ pub(super) struct CommandComplete<'a> {
     pub(super) rows: u16,
     pub(super) command_tag: &'a SQLCommand,
 }
-impl Encode for CommandComplete<'_> {
+impl<'a> Encode for CommandComplete<'a> {
     fn encode(&self) -> Vec<u8> {
         let mut payload = BytesMut::new();
         let command_tag = self.create_command_tag();
@@ -138,7 +140,7 @@ impl Encode for CommandComplete<'_> {
     }
 }
 
-impl CommandComplete<'_> {
+impl<'a> CommandComplete<'a> {
     fn create_command_tag(&self) -> String {
         match self.command_tag {
             SQLCommand::Insert => format!("INSERT 0 {}", self.rows),
@@ -216,10 +218,53 @@ pub(super) struct Query {
     pub(super) bytes: Vec<u8>,
 }
 impl Decode for Query {
-    fn decode(&self) -> Result<String, FromUtf8Error> {
-        let payload = self.bytes[5..self.bytes.len() - 1].to_vec();
-        String::from_utf8(payload)
+    type Output = String;
+    fn decode(&self) -> Result<String, ByteReaderError> {
+        ByteReader::new(&self.bytes, 5).read_cstring()
     }
 }
 
+pub(super) struct ParseMessageContent {
+    pub(super) name: String,
+    pub(super) query: String,
+    pub(super) parameter_data_types_len: i16,
+    pub(super) parameter_data_types: i32,
+}
+pub(super) struct Parse {
+    pub(super) bytes: Vec<u8>,
+}
+impl Decode for Parse {
+    type Output = ParseMessageContent;
+    fn decode(&self) -> Result<ParseMessageContent, ByteReaderError> {
+        let mut reader = ByteReader::new(&self.bytes, 5);
+        let parsed_message = ParseMessageContent {
+            name: match reader.read_cstring() {
+                Ok(name) => name,
+                Err(err) => return Err(err),
+            },
+            query: match reader.read_cstring() {
+                Ok(query) => query,
+                Err(err) => return Err(err),
+            },
+            parameter_data_types_len: match reader.read_i16() {
+                Ok(len) => len,
+                Err(err) => return Err(err),
+            },
+            parameter_data_types: match reader.read_i32() {
+                Ok(types) => types,
+                Err(err) => return Err(err),
+            },
+        };
+
+        println!(
+            "name: '{}', query: '{}', parameter_data_types_len: {}, parameter_data_types: {}",
+            parsed_message.name,
+            parsed_message.query,
+            parsed_message.parameter_data_types_len,
+            parsed_message.parameter_data_types
+        );
+
+        Ok(parsed_message)
+    }
+}
 // Helpers
