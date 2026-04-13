@@ -1,3 +1,4 @@
+use super::messages::ClientMessageContent::{ParseMessage, QueryMessage};
 use super::reader::ByteReader;
 use super::types::StateHandlingResult;
 use super::{
@@ -35,32 +36,48 @@ pub(super) async fn ready_for_query(
 ) -> StateHandlingResult {
     let message_type_byte = protocol_state.read_buffer[0];
     ready_for_query_message_received(message_type_byte);
+    let mut reader = ByteReader::new(&protocol_state.read_buffer, 0);
+    let messages = match reader.crawl_and_find_messages() {
+        Ok(messages) => {
+            for message in messages {
+                match message {
+                    ParseMessage(content) => {}
+                    QueryMessage(content) => {}
+                }
+            }
+        }
+        Err(err) => {
+            return StateHandlingResult::Error(err.message);
+        }
+    };
+
     if message_type_byte == b'X' {
         return StateHandlingResult::Break("client sent terminate message".to_string());
     }
-    if message_type_byte == b'P' {
-        let parse = Parse {
-            bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
-        }
-        .decode();
-        // let cursor: usize = 5; // We don't want to read the message length
-        // let mut reader = ByteReader::new(&protocol_state.read_buffer[..buffer_length], cursor);
-        // loop {
-        //     match reader.read_cstring() {
-        //         Ok(string) => println!("-----\n{}\n-----", string),
-        //         Err(err) => {
-        //             println!("{}", err.message);
-        //             break;
-        //         }
-        //     }
-        // }
-    }
+    // if message_type_byte == b'P' {
+    //     let parse = Parse {
+    //         bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
+    //     }
+    //     .decode();
+    //     // let cursor: usize = 5; // We don't want to read the message length
+    //     // let mut reader = ByteReader::new(&protocol_state.read_buffer[..buffer_length], cursor);
+    //     // loop {
+    //     //     match reader.read_cstring() {
+    //     //         Ok(string) => println!("-----\n{}\n-----", string),
+    //     //         Err(err) => {
+    //     //             println!("{}", err.message);
+    //     //             break;
+    //     //         }
+    //     //     }
+    //     // }
+    // }
     match (Query {
         bytes: protocol_state.read_buffer[..buffer_length].to_vec(),
     }
     .decode())
     {
-        Ok(query_string) => {
+        Ok(message) => {
+            let query_string = message.query;
             match command_tag_from_query_str(&query_string) {
                 Some(command_tag) => {
                     println!("Decoded query: {}", query_string);

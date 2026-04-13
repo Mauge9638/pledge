@@ -213,14 +213,30 @@ impl Encode for ErrorResponse {
     }
 }
 
+pub(super) enum ClientMessageContent {
+    QueryMessage(QueryMessageContent),
+    ParseMessage(ParseMessageContent),
+    //BindMessage(Bind),
+    //ExecuteMessage(Execute),
+    //SyncMessage(Sync),
+    //DescribeMessage(Describe),
+    //CloseMessage(Close),
+    //TerminateMessage(Terminate),
+}
+
 // Client
+pub(super) struct QueryMessageContent {
+    pub(super) query: String,
+}
 pub(super) struct Query {
     pub(super) bytes: Vec<u8>,
 }
 impl Decode for Query {
-    type Output = String;
-    fn decode(&self) -> Result<String, ByteReaderError> {
-        ByteReader::new(&self.bytes, 5).read_cstring()
+    type Output = QueryMessageContent;
+    fn decode(&self) -> Result<QueryMessageContent, ByteReaderError> {
+        Ok(QueryMessageContent {
+            query: ByteReader::new(&self.bytes, 0).read_cstring()?,
+        })
     }
 }
 
@@ -228,7 +244,7 @@ pub(super) struct ParseMessageContent {
     pub(super) name: String,
     pub(super) query: String,
     pub(super) parameter_data_types_len: i16,
-    pub(super) parameter_data_types: i32,
+    pub(super) parameter_data_types: Vec<i32>,
 }
 pub(super) struct Parse {
     pub(super) bytes: Vec<u8>,
@@ -236,28 +252,75 @@ pub(super) struct Parse {
 impl Decode for Parse {
     type Output = ParseMessageContent;
     fn decode(&self) -> Result<ParseMessageContent, ByteReaderError> {
-        let mut reader = ByteReader::new(&self.bytes, 5);
-        let parsed_message = ParseMessageContent {
-            name: match reader.read_cstring() {
-                Ok(name) => name,
-                Err(err) => return Err(err),
-            },
-            query: match reader.read_cstring() {
-                Ok(query) => query,
-                Err(err) => return Err(err),
-            },
-            parameter_data_types_len: match reader.read_i16() {
-                Ok(len) => len,
-                Err(err) => return Err(err),
-            },
-            parameter_data_types: match reader.read_i32() {
-                Ok(types) => types,
-                Err(err) => return Err(err),
-            },
+        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut parsed_message = ParseMessageContent {
+            name: reader.read_cstring()?,
+            query: reader.read_cstring()?,
+            parameter_data_types_len: reader.read_i16()?,
+            parameter_data_types: Vec::new(),
         };
+        for _ in 0..parsed_message.parameter_data_types_len {
+            parsed_message.parameter_data_types.push(reader.read_i32()?)
+        }
 
         println!(
-            "name: '{}', query: '{}', parameter_data_types_len: {}, parameter_data_types: {}",
+            "name: '{}', query: '{}', parameter_data_types_len: {}, parameter_data_types: {:?}",
+            parsed_message.name,
+            parsed_message.query,
+            parsed_message.parameter_data_types_len,
+            parsed_message.parameter_data_types
+        );
+
+        Ok(parsed_message)
+    }
+}
+
+/*
+* Bind (F)
+* String The name of the destination portal (an empty string selects the unnamed portal).
+* String The name of the source prepared statement (an empty string selects the unnamed prepared statement).
+* Int16 The number of parameter format codes that follow (denoted C below). This can be zero to indicate that there are no parameters or that the parameters all use the default format (text); or one, in which case the specified format code is applied to all parameters; or it can equal the actual number of parameters.
+* Int16[C] The parameter format codes. Each must presently be zero (text) or one (binary).
+* Int16 The number of parameter values that follow (possibly zero). This must match the number of parameters needed by the query.
+*
+* Next, the following pair of fields appear for each parameter:
+* Int32 The length of the parameter value, in bytes (this count does not include itself). Can be zero. As a special case, -1 indicates a NULL parameter value. No value bytes follow in the NULL case.
+* Byte n The value of the parameter, in the format indicated by the associated format code. n is the above length.
+*
+* After the last parameter, the following fields appear:
+* Int16 The number of result-column format codes that follow (denoted R below). This can be zero to indicate that there are no result columns or that the result columns should all use the default format (text); or one, in which case the specified format code is applied to all result columns (if any); or it can equal the actual number of result columns of the query.
+* Int16[R] The result-column format codes. Each must presently be zero (text) or one (binary).
+*/
+pub(super) struct BindMessageContent {
+    pub(super) name: String,
+    pub(super) source_prepared_statement: String,
+    pub(super) parameter_format_codes_len: i16,
+    pub(super) parameter_format_codes: Vec<i16>,
+    pub(super) parameter_values_len: i16,
+    pub(super) parameter_values_byte_len: i32,
+    pub(super) parameter_values: Vec<Vec<u8>>,
+    pub(super) result_column_format_codes_len: i16,
+    pub(super) result_column_format_codes: Vec<i16>,
+}
+pub(super) struct Bind {
+    pub(super) bytes: Vec<u8>,
+}
+impl Decode for Bind {
+    type Output = BindMessageContent;
+    fn decode(&self) -> Result<BindMessageContent, ByteReaderError> {
+        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut parsed_message = BindMessageContent {
+            name: reader.read_cstring()?,
+            query: reader.read_cstring()?,
+            parameter_data_types_len: reader.read_i16()?,
+            parameter_data_types: Vec::new(),
+        };
+        for _ in 0..parsed_message.parameter_data_types_len {
+            parsed_message.parameter_data_types.push(reader.read_i32()?)
+        }
+
+        println!(
+            "name: '{}', query: '{}', parameter_data_types_len: {}, parameter_data_types: {:?}",
             parsed_message.name,
             parsed_message.query,
             parsed_message.parameter_data_types_len,

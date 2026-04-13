@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tokio::net::TcpStream;
 
 use crate::{AppState, wire::ReadBuffer};
@@ -26,6 +28,7 @@ pub(super) struct ProtocolState {
     pub app_state: AppState,
     pub state: WireProtocolStates,
     pub read_buffer: ReadBuffer,
+    pub prepared_statements: HashMap<String, String>,
 }
 
 pub(super) enum StateHandlingResult {
