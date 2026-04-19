@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use sqlx::postgres::types::Oid;
 use sqlx::{PgPool, Row};
 use tokio::net::tcp::OwnedReadHalf;
+use tokio::sync::mpsc::Sender;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::OwnedWriteHalf,
@@ -91,15 +92,13 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
     };
     let mut db_state = DBState {
         app_state: app_state.clone(),
-        buffer: vec![0u8; 32 * 1024],
+        buffer: vec![0u8; 1 * 1024],
     };
 
     let client_spawn = tokio::spawn(async move {
         println!("Accepted connection from {:?} ", client_read.peer_addr(),);
-        let mut cached;
         let mut buffer_data_length;
         'outerLoop: loop {
-            cached = false;
             buffer_data_length = 0;
             'innerLoop: loop {
                 buffer_data_length += match client_read
@@ -122,56 +121,9 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                     break 'innerLoop;
                 }
             }
-
-            let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
-            match reader.crawl_and_find_messages_client() {
-                Ok(messages) => {
-                    for message in messages {
-                        match message {
-                            QueryMessage(content) => {
-                                println!("query: {:?}", content.query);
-                            }
-                            ParseMessage(content) => {
-                                let _ = parse_message(content, &mut client_state).await;
-                            }
-                            BindMessage(content) => {
-                                let _ = bind_message(content, &mut client_state).await;
-                            }
-                            ExecuteMessage(content) => {
-                                match execute_message(content, &mut client_state).await {
-                                    Ok(result) => match result {
-                                        Some(result) => match result {
-                                            CacheCommand::Replay(value) => {
-                                                let _ = tx.send(CacheCommand::Replay(value)).await;
-                                                println!("should be set in cache")
-                                                //cached = true;
-                                            }
-                                            CacheCommand::Capture(key) => {
-                                                let _ = tx.send(CacheCommand::Capture(key)).await;
-                                            }
-                                        },
-                                        None => {
-                                            println!("should not be set in cache")
-                                        }
-                                    },
-                                    Err(err) => {
-                                        println!("error occured");
-                                        let _ = err;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-            if !cached {
-                stream_try_write(&db_write, &client_state.buffer[..buffer_data_length]).await;
-            }
+            handle_client_spawn(&mut client_state, &db_write, buffer_data_length, &tx).await;
         }
     });
-    // let _ = db_read.readable().await;
     let db_spawn = tokio::spawn(async move {
         let mut buffer_data_length;
         'outerLoop: loop {
@@ -179,13 +131,13 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
 
             tokio::select! {
                 result = db_read.read(&mut db_state.buffer[buffer_data_length..]) => {
-                    if let Err(e) = handle_db_read(&result, &mut db_state, &client_write).await {
+                    if let Err(e) = handle_db_read(&result, &mut db_state, &client_write, &mut buffer_data_length).await {
                         eprintln!("db read failed: {e}");
                         break 'outerLoop;
                     }
                 }
                 cache_command = rx.recv() => {
-                    if let Err(e) = handle_db_cached(cache_command,&mut db_state, &client_write).await {
+                    if let Err(e) = handle_db_cached(cache_command,&mut db_state, &client_write, &mut buffer_data_length).await {
                         eprintln!("cache handling failed: {e}");
                         break 'outerLoop;
                     }
@@ -193,29 +145,83 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
             }
         }
     });
+
+    let handles = tokio::join!(client_spawn, db_spawn);
+}
+
+async fn handle_client_spawn(
+    client_state: &mut ClientState,
+    db_write: &OwnedWriteHalf,
+    buffer_data_length: usize,
+    tx: &Sender<CacheCommand>,
+) {
+    let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
+    match reader.crawl_and_find_messages_client() {
+        Ok(messages) => {
+            for message in messages {
+                match message {
+                    QueryMessage(content) => {
+                        println!("query: {:?}", content.query);
+                    }
+                    ParseMessage(content) => {
+                        let _ = parse_message(content, client_state).await;
+                    }
+                    BindMessage(content) => {
+                        let _ = bind_message(content, client_state).await;
+                    }
+                    ExecuteMessage(content) => {
+                        match execute_message(content, client_state).await {
+                            Ok(result) => match result {
+                                Some(result) => match result {
+                                    CacheCommand::Replay(value) => {
+                                        let _ = tx.send(CacheCommand::Replay(value)).await;
+                                        println!("should be set in cache")
+                                        //cached = true;
+                                    }
+                                    CacheCommand::Capture(key) => {
+                                        let _ = tx.send(CacheCommand::Capture(key)).await;
+                                    }
+                                },
+                                None => {
+                                    println!("should not be set in cache")
+                                }
+                            },
+                            Err(err) => {
+                                println!("error occured");
+                                let _ = err;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(_) => {}
+    }
+    stream_try_write(&db_write, &client_state.buffer[..buffer_data_length]).await;
 }
 
 async fn handle_db_read(
     result: &Result<usize, Error>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
+    buffer_data_length: &mut usize,
 ) -> Result<(), String> {
-    let mut buffer_data_length = 0;
     match result {
         Ok(n) => {
-            buffer_data_length += n;
+            *buffer_data_length += n;
             'innerLoop: loop {
-                if buffer_data_length == 0 {
+                if *buffer_data_length == 0 {
                     break 'innerLoop;
                 }
-                if buffer_data_length >= db_state.buffer.len() {
-                    println!("Resizing client buffer");
+                if *buffer_data_length >= db_state.buffer.len() {
+                    println!("Resizing db buffer");
                     db_state.buffer.resize(db_state.buffer.len() * 2, 0);
                 } else {
                     break 'innerLoop;
                 }
             }
-            let mut reader = ByteReader::new(&db_state.buffer[..buffer_data_length], 0);
+            let mut reader = ByteReader::new(&db_state.buffer[..*buffer_data_length], 0);
             match reader.crawl_and_find_messages_db() {
                 Ok(messages) => {
                     for message in messages {
@@ -251,7 +257,7 @@ async fn handle_db_read(
                 }
                 Err(_) => {}
             }
-            stream_try_write(&client_write, &db_state.buffer[..buffer_data_length]).await;
+            stream_try_write(&client_write, &db_state.buffer[..*buffer_data_length]).await;
             Ok(())
         }
         Err(err) => {
@@ -265,6 +271,7 @@ async fn handle_db_cached(
     cache_command: Option<CacheCommand>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
+    buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     let mut buffer_data_length = 0;
     match cache_command {
