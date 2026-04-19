@@ -14,7 +14,6 @@ pub use server::state::AppState;
 use crate::{
     cache::lfu::Cache,
     metrics::{CACHE_MEMORY_BYTES, CACHE_SIZE},
-    wire::get_pg_type_lens,
 };
 
 #[tokio::main]
@@ -29,11 +28,11 @@ async fn main() {
             .expect("Failed to connect to database"),
     );
 
-    let pg_type_lens = if let Ok(pg_type_lens) = get_pg_type_lens(&pool).await {
-        Arc::new(pg_type_lens)
-    } else {
-        panic!("Couldn't get pg_type_lens")
-    };
+    // let pg_type_lens = if let Ok(pg_type_lens) = get_pg_type_lens(&pool).await {
+    //     Arc::new(pg_type_lens)
+    // } else {
+    //     panic!("Couldn't get pg_type_lens")
+    // };
 
     let matcher = Arc::new(QueryMatcher::new(&config));
 
@@ -76,7 +75,8 @@ async fn main() {
         matcher,
         cache,
         global_ttl: cache_config.global_ttl,
-        pg_type_lens,
+        // pg_type_lens,
+        database_config: config.database,
     };
 
     server::run_server(&config.server, state).await;
