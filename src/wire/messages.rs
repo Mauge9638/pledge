@@ -226,13 +226,13 @@ impl Encode for BindComplete {
 
 // Client
 pub(super) enum ClientMessageContent {
-    QueryMessage(QueryMessageContent),
-    ParseMessage(ParseMessageContent),
-    BindMessage(BindMessageContent),
-    DescribeMessage(DescribeMessageContent),
-    ExecuteMessage(ExecuteMessageContent),
+    QueryMessage(QueryMessageContent, usize),
+    ParseMessage(ParseMessageContent, usize),
+    BindMessage(BindMessageContent, usize),
+    DescribeMessage(DescribeMessageContent, usize),
+    ExecuteMessage(ExecuteMessageContent, usize),
     SyncMessage,
-    //CloseMessage(CloseMessageContent),
+    //CloseMessage(CloseMessageContent, usize),
     TerminateMessage,
     UnknownMessage,
 }

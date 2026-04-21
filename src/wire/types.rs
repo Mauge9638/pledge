@@ -84,6 +84,17 @@ pub(super) struct Portal {
 }
 
 pub(super) enum CacheCommand {
-    Replay(Vec<u8>), // cache hit: write these to client, skip DB
-    Capture(String), // cache miss: next DB response belongs to this key
+    Replay(Vec<u8>, CacheCommandMetadata), // cache hit: write these to client, skip DB
+    Capture(String, CacheCommandMetadata), // cache miss: next DB response belongs to this key
+}
+
+pub(super) enum SectionType {
+    ExtendedQuery,
+    SimpleQuery,
+}
+
+pub(super) struct CacheCommandMetadata {
+    pub section_type: SectionType,
+    pub length: usize,
+    pub message_number: i32,
 }

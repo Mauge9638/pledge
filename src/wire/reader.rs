@@ -1,3 +1,5 @@
+use std::str::from_utf8;
+
 use super::{
     Decode, WireProtocolStates,
     messages::{Bind, ClientMessageContent, DBMessageContent, Describe, Execute, Parse, Query},
@@ -83,35 +85,50 @@ impl<'a> ByteReader<'a> {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::QueryMessage(decoded))
+                    messages.push(ClientMessageContent::QueryMessage(
+                        decoded,
+                        slice_end_index - self.cursor,
+                    ))
                 }
                 b'P' => {
                     let decoded = Parse {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::ParseMessage(decoded))
+                    messages.push(ClientMessageContent::ParseMessage(
+                        decoded,
+                        slice_end_index - self.cursor,
+                    ))
                 } // Parse
                 b'B' => {
                     let decoded = Bind {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::BindMessage(decoded))
+                    messages.push(ClientMessageContent::BindMessage(
+                        decoded,
+                        slice_end_index - self.cursor,
+                    ))
                 }
                 b'D' => {
                     let decoded = Describe {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::DescribeMessage(decoded))
+                    messages.push(ClientMessageContent::DescribeMessage(
+                        decoded,
+                        slice_end_index - self.cursor,
+                    ))
                 } // Describe
                 b'E' => {
                     let decoded = Execute {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::ExecuteMessage(decoded))
+                    messages.push(ClientMessageContent::ExecuteMessage(
+                        decoded,
+                        slice_end_index - self.cursor,
+                    ))
                 } // Execute
                 b'S' => messages.push(ClientMessageContent::SyncMessage), // Sync
                 b'C' => println!("identification byte: 'Close'"),         // Close

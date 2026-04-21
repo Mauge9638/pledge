@@ -23,6 +23,7 @@ use messages::{Decode, RowDescription};
 use crate::AppState;
 use crate::cache::store::cache_key_wire;
 use crate::config::DatabaseConfig;
+use crate::wire::types::{CacheCommandMetadata, SectionType};
 use reader::{ByteReader, ByteReaderError, ByteReaderErrorKind};
 //use state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
 use types::{
@@ -44,6 +45,7 @@ mod messages;
 mod reader;
 mod state_handling;
 pub mod types;
+mod writer;
 
 pub async fn listener_start(listener: TcpListener, app_state: &AppState) {
     loop {
@@ -92,7 +94,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
     };
     let mut db_state = DBState {
         app_state: app_state.clone(),
-        buffer: vec![0u8; 1 * 1024],
+        buffer: vec![0u8; 32 * 1024],
     };
 
     let client_spawn = tokio::spawn(async move {
@@ -121,7 +123,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                     break 'innerLoop;
                 }
             }
-            handle_client_spawn(&mut client_state, &db_write, buffer_data_length, &tx).await;
+            handle_client(&mut client_state, &db_write, buffer_data_length, &tx).await;
         }
     });
     let db_spawn = tokio::spawn(async move {
@@ -136,8 +138,8 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                         break 'outerLoop;
                     }
                 }
-                cache_command = rx.recv() => {
-                    if let Err(e) = handle_db_cached(cache_command,&mut db_state, &client_write, &mut buffer_data_length).await {
+                cache_commands = rx.recv() => {
+                    if let Err(e) = handle_db_cached(cache_commands,&mut db_state, &client_write, &mut buffer_data_length).await {
                         eprintln!("cache handling failed: {e}");
                         break 'outerLoop;
                     }
@@ -149,37 +151,48 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
     let handles = tokio::join!(client_spawn, db_spawn);
 }
 
-async fn handle_client_spawn(
+async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
     buffer_data_length: usize,
-    tx: &Sender<CacheCommand>,
+    tx: &Sender<Vec<CacheCommand>>,
 ) {
     let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
     match reader.crawl_and_find_messages_client() {
         Ok(messages) => {
+            let mut cacheable_entries: Vec<CacheCommand> = Vec::new();
+            let mut message_number = 0;
+            let mut total_length = 0;
             for message in messages {
                 match message {
-                    QueryMessage(content) => {
+                    QueryMessage(content, length) => {
+                        message_number += 1;
                         println!("query: {:?}", content.query);
+                        total_length = 0;
                     }
-                    ParseMessage(content) => {
+                    ParseMessage(content, length) => {
                         let _ = parse_message(content, client_state).await;
+                        total_length += length;
                     }
-                    BindMessage(content) => {
+                    BindMessage(content, length) => {
                         let _ = bind_message(content, client_state).await;
+                        total_length += length;
                     }
-                    ExecuteMessage(content) => {
-                        match execute_message(content, client_state).await {
+                    ExecuteMessage(content, length) => {
+                        message_number += 1;
+                        total_length += length;
+                        match execute_message(content, client_state, message_number, total_length)
+                            .await
+                        {
                             Ok(result) => match result {
                                 Some(result) => match result {
-                                    CacheCommand::Replay(value) => {
-                                        let _ = tx.send(CacheCommand::Replay(value)).await;
-                                        println!("should be set in cache")
-                                        //cached = true;
+                                    CacheCommand::Replay(value, message_number) => {
+                                        cacheable_entries
+                                            .push(CacheCommand::Replay(value, message_number));
                                     }
-                                    CacheCommand::Capture(key) => {
-                                        let _ = tx.send(CacheCommand::Capture(key)).await;
+                                    CacheCommand::Capture(key, message_number) => {
+                                        cacheable_entries
+                                            .push(CacheCommand::Capture(key, message_number));
                                     }
                                 },
                                 None => {
@@ -191,9 +204,14 @@ async fn handle_client_spawn(
                                 let _ = err;
                             }
                         }
+                        total_length = 0;
                     }
                     _ => {}
                 }
+            }
+            if cacheable_entries.len() > 0 {
+                let _ = tx.send(cacheable_entries).await;
+                return;
             }
         }
         Err(_) => {}
@@ -244,11 +262,9 @@ async fn handle_db_read(
                             DBMessageContent::ReadyForQuery => {
                                 println!("got ReadyForQuery")
                             }
-
                             DBMessageContent::AuthenticationOk => {
                                 println!("got AuthenticationOk")
                             }
-
                             DBMessageContent::UnknownMessage => {
                                 println!("got UnknownMessage")
                             }
@@ -268,22 +284,26 @@ async fn handle_db_read(
 }
 
 async fn handle_db_cached(
-    cache_command: Option<CacheCommand>,
+    cache_commands: Option<Vec<CacheCommand>>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     let mut buffer_data_length = 0;
-    match cache_command {
-        Some(command) => match command {
-            CacheCommand::Replay(bytes) => {
-                stream_try_write(&client_write, &bytes).await;
-                println!("GOT CACHED RESPONSE TO DB SPAWN");
+    match cache_commands {
+        Some(commands) => {
+            for cache_command in commands {
+                match cache_command {
+                    CacheCommand::Replay(bytes, message_number) => {
+                        stream_try_write(&client_write, &bytes).await;
+                        println!("GOT CACHED RESPONSE TO DB SPAWN");
+                    }
+                    CacheCommand::Capture(key, message_number) => {
+                        println!("should cache this, {}", key)
+                    }
+                }
             }
-            CacheCommand::Capture(key) => {
-                println!("should cache this, {}", key)
-            }
-        },
+        }
         None => return Err("cache command not found".to_string()),
     }
     Ok(())
@@ -339,41 +359,32 @@ async fn bind_message(
 async fn execute_message(
     content: ExecuteMessageContent,
     client_state: &mut ClientState,
+    message_number: i32,
+    total_length: usize,
 ) -> Result<Option<CacheCommand>, StateHandlingResult> {
-    let portal = match client_state.portals.get(&content.name) {
-        Some(portal) => portal,
-        None => {
-            return Err(StateHandlingResult::Error(
-                "invalid portal name".to_string(),
-            ));
-        }
-    };
-    let prepared_statement = match client_state
-        .prepared_statements
-        .get(&portal.source_prepared_statement_name)
-    {
-        Some(prepared_statement) => prepared_statement,
-        None => {
-            return Err(StateHandlingResult::Error(
-                "invalid source prepared statement name".to_string(),
-            ));
-        }
+    let cache_key = match is_cache_configured(content, client_state) {
+        Some(cache_key) => cache_key,
+        None => return Ok(None),
     };
 
-    println!("recieved Execute message");
-
-    if client_state
-        .app_state
-        .matcher
-        .template_exists(&prepared_statement.query)
-    {
-        let cache_key = cache_key_wire(&prepared_statement.query, &portal.parameter_values);
-        return Ok(match get_from_cache(client_state, &cache_key) {
-            Some(value) => Some(CacheCommand::Replay(value)),
-            None => Some(CacheCommand::Capture(cache_key)),
-        });
-    }
-    Ok(None)
+    return Ok(match get_from_cache(client_state, &cache_key) {
+        Some(value) => Some(CacheCommand::Replay(
+            value,
+            CacheCommandMetadata {
+                section_type: SectionType::ExtendedQuery,
+                length: total_length,
+                message_number,
+            },
+        )),
+        None => Some(CacheCommand::Capture(
+            cache_key,
+            CacheCommandMetadata {
+                section_type: SectionType::ExtendedQuery,
+                length: total_length,
+                message_number,
+            },
+        )),
+    });
 }
 
 fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Vec<u8>> {
@@ -389,4 +400,32 @@ fn set_in_cache(app_state: &AppState, query: &str, key: &str, result: Vec<u8>) {
         };
         app_state.cache.insert(key.to_string(), result, expiration);
     }
+}
+
+fn is_cache_configured(
+    content: ExecuteMessageContent,
+    client_state: &mut ClientState,
+) -> Option<String> {
+    let portal = match client_state.portals.get(&content.name) {
+        Some(portal) => portal,
+        None => return None,
+    };
+    let prepared_statement = match client_state
+        .prepared_statements
+        .get(&portal.source_prepared_statement_name)
+    {
+        Some(prepared_statement) => prepared_statement,
+        None => return None,
+    };
+    if client_state
+        .app_state
+        .matcher
+        .template_exists(&prepared_statement.query)
+    {
+        return Some(cache_key_wire(
+            &prepared_statement.query,
+            &portal.parameter_values,
+        ));
+    }
+    None
 }
