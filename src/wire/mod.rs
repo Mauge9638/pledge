@@ -248,22 +248,6 @@ async fn handle_db_cached(
     client_write: &OwnedWriteHalf,
     buffer_data_length: &mut usize,
 ) -> Result<(), String> {
-    match cache_commands {
-        Some(commands) => {
-            for cache_command in commands {
-                match cache_command {
-                    CacheCommand::Replay(bytes, message_number) => {
-                        stream_try_write(&client_write, &bytes).await;
-                        println!("this is already cached");
-                    }
-                    CacheCommand::Capture(key, message_number) => {
-                        println!("should cache this, {}", key)
-                    }
-                }
-            }
-        }
-        None => return Err("cache command not found".to_string()),
-    }
     Ok(())
 }
 
@@ -373,14 +357,14 @@ fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedRes
     return client_state.app_state.cache.get(&key);
 }
 
-fn set_in_cache(app_state: &AppState, query: &str, key: &str, result: Vec<u8>) {
+fn set_in_cache(app_state: &AppState, query: &str, key: &str, data: CachedResponse) {
     println!("cache_key set: {}", query);
     if let Some(template) = app_state.matcher.find_template(query) {
         let expiration = match template.ttl {
             Some(ttl) => Instant::now() + Duration::from_secs(ttl),
             None => Instant::now() + Duration::from_secs(app_state.global_ttl),
         };
-        app_state.cache.insert(key.to_string(), result, expiration);
+        app_state.cache.insert(key.to_string(), data, expiration);
     }
 }
 
@@ -479,30 +463,6 @@ async fn find_cache_related_messages(
                     let mut paired_parse_message = None;
                     let mut paired_bind_message = None;
                     let mut paired_describe_message = None;
-                    if cache_response.is_some() {
-                        let portal_name = &data.name;
-                        'find_bind: for (index, current_bind_message) in
-                            bind_messages.clone().iter().enumerate()
-                        {
-                            if &current_bind_message.0.portal_name == portal_name {
-                                paired_bind_message = Some(current_bind_message.clone());
-                                bind_messages.remove(index);
-                                'find_parse: for (index, current_parse_message) in
-                                    parse_messages.clone().iter().enumerate()
-                                {
-                                    if current_parse_message.0.prepared_statement_name
-                                        == current_bind_message.0.source_prepared_statement_name
-                                    {
-                                        paired_parse_message = Some(current_parse_message.clone());
-                                        parse_messages.remove(index);
-                                        break 'find_parse;
-                                    }
-                                }
-
-                                break 'find_bind;
-                            }
-                        }
-                    }
 
                     'find_describe: for (index, current_describe_message) in
                         describe_messages.clone().iter().enumerate()
@@ -541,9 +501,9 @@ async fn find_cache_related_messages(
                         None => DescribeKind::None,
                     };
 
-                    let cache_command = match cache_response {
+                    let cache_command = match &cache_response {
                         Some(data) => CacheCommand::Replay {
-                            data,
+                            data: data.clone(),
                             order,
                             describe_kind,
                         },
@@ -553,6 +513,31 @@ async fn find_cache_related_messages(
                             describe_kind,
                         },
                     };
+
+                    if cache_response.is_some() {
+                        let portal_name = &data.name;
+                        'find_bind: for (index, current_bind_message) in
+                            bind_messages.clone().iter().enumerate()
+                        {
+                            if &current_bind_message.0.portal_name == portal_name {
+                                paired_bind_message = Some(current_bind_message.clone());
+                                bind_messages.remove(index);
+                                'find_parse: for (index, current_parse_message) in
+                                    parse_messages.clone().iter().enumerate()
+                                {
+                                    if current_parse_message.0.prepared_statement_name
+                                        == current_bind_message.0.source_prepared_statement_name
+                                    {
+                                        paired_parse_message = Some(current_parse_message.clone());
+                                        parse_messages.remove(index);
+                                        break 'find_parse;
+                                    }
+                                }
+
+                                break 'find_bind;
+                            }
+                        }
+                    }
 
                     let pending_command = PendingCommandExtended {
                         execute: Range { start, end },
@@ -579,7 +564,7 @@ async fn find_cache_related_messages(
                         },
                         action: cache_command.clone(),
                     };
-                    cache_commands.push(cache_command);
+                    cache_commands.push(cache_command.clone());
                     pending_commands.push(PendingCommand::Extended(pending_command));
                 }
             }
