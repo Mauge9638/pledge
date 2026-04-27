@@ -1,12 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use sqlx::postgres::{PgColumn, PgStatement};
+use super::DescribeMessageContent;
+use crate::{AppState, cache::lfu::CachedResponse};
 use tokio::net::{
     TcpStream,
     tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
-
-use crate::AppState;
 
 #[derive(Debug)]
 pub(super) enum WireProtocolStates {
@@ -83,18 +82,57 @@ pub(super) struct Portal {
     pub result_column_format_codes: Vec<i16>,
 }
 
+#[derive(Clone)]
 pub(super) enum CacheCommand {
-    Replay(Vec<u8>, CacheCommandMetadata), // cache hit: write these to client, skip DB
-    Capture(String, CacheCommandMetadata), // cache miss: next DB response belongs to this key
+    Replay {
+        data: Arc<CachedResponse>,
+        order: u16,
+        describe_kind: DescribeKind,
+    }, // cache hit: write these to client, skip DB
+    Capture {
+        key: String,
+        order: u16,
+        describe_kind: DescribeKind,
+    }, // cache miss: next DB response belongs to this key
 }
 
-pub(super) enum SectionType {
-    ExtendedQuery,
-    SimpleQuery,
+#[derive(Clone)]
+pub(super) enum DescribeKind {
+    None,
+    Portal,
+    Statement,
 }
 
-pub(super) struct CacheCommandMetadata {
-    pub section_type: SectionType,
-    pub length: usize,
-    pub message_number: i32,
+pub(super) enum PendingCommand {
+    Extended(PendingCommandExtended),
+    Simple(PendingCommandSimple),
+}
+
+pub(super) struct PendingCommandExtended {
+    pub execute: Range<usize>,
+    pub parse: Option<Range<usize>>,
+    pub bind: Option<Range<usize>>,
+    pub describe: Option<Range<usize>>,
+    pub action: CacheCommand,
+}
+
+impl PendingCommandExtended {
+    pub fn new() -> Self {
+        Self {
+            execute: 0..0,
+            parse: None,
+            bind: None,
+            describe: None,
+            action: CacheCommand::Capture {
+                key: String::new(),
+                order: 0,
+                describe_kind: DescribeKind::None,
+            },
+        }
+    }
+}
+
+pub(super) struct PendingCommandSimple {
+    pub query: Range<usize>,
+    pub action: CacheCommand,
 }

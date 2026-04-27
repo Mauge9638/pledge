@@ -225,12 +225,33 @@ impl Encode for BindComplete {
 }
 
 // Client
+#[derive(Clone)]
 pub(super) enum ClientMessageContent {
-    QueryMessage(QueryMessageContent, usize),
-    ParseMessage(ParseMessageContent, usize),
-    BindMessage(BindMessageContent, usize),
-    DescribeMessage(DescribeMessageContent, usize),
-    ExecuteMessage(ExecuteMessageContent, usize),
+    QueryMessage {
+        data: QueryMessageContent,
+        start: usize,
+        end: usize,
+    },
+    ParseMessage {
+        data: ParseMessageContent,
+        start: usize,
+        end: usize,
+    },
+    BindMessage {
+        data: BindMessageContent,
+        start: usize,
+        end: usize,
+    },
+    DescribeMessage {
+        data: DescribeMessageContent,
+        start: usize,
+        end: usize,
+    },
+    ExecuteMessage {
+        data: ExecuteMessageContent,
+        start: usize,
+        end: usize,
+    },
     SyncMessage,
     //CloseMessage(CloseMessageContent, usize),
     TerminateMessage,
@@ -240,14 +261,15 @@ pub(super) enum ClientMessageContent {
 pub(super) enum DBMessageContent {
     ParseComplete,
     BindComplete,
-    RowDescription,
-    DataRow,
+    RowDescription(Vec<u8>),
+    DataRow(Vec<u8>),
     CommandComplete,
     ReadyForQuery,
     AuthenticationOk,
     UnknownMessage,
 }
 
+#[derive(Clone)]
 pub(super) struct QueryMessageContent {
     pub(super) query: String,
 }
@@ -262,7 +284,7 @@ impl Decode for Query {
         })
     }
 }
-
+#[derive(Clone)]
 pub(super) struct ParseMessageContent {
     pub(super) prepared_statement_name: String,
     pub(super) query: String,
@@ -290,7 +312,7 @@ impl Decode for Parse {
         Ok(parsed_message)
     }
 }
-
+#[derive(Clone)]
 pub(super) struct BindMessageContent {
     pub(super) portal_name: String,
     pub(super) source_prepared_statement_name: String,
@@ -348,7 +370,7 @@ impl Decode for Bind {
         Ok(parsed_message)
     }
 }
-
+#[derive(Clone)]
 pub(super) enum DescribeMessageContentTarget {
     PreparedStatement,
     Portal,
@@ -376,7 +398,7 @@ impl Display for DescribeMessageContentTarget {
         }
     }
 }
-
+#[derive(Clone)]
 pub(super) struct DescribeMessageContent {
     /// 'S' means prepared_statement and 'P' means portal
     pub(super) target: DescribeMessageContentTarget,
@@ -399,7 +421,7 @@ impl Decode for Describe {
         Ok(parsed_message)
     }
 }
-
+#[derive(Clone)]
 pub(super) struct ExecuteMessageContent {
     /// The name of the target (portal) to execute, if empty it's the unnamed one.
     pub(super) name: String,

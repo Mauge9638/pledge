@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Error};
+use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sqlx::postgres::types::Oid;
@@ -21,14 +23,16 @@ use messages::{
 use messages::{Decode, RowDescription};
 
 use crate::AppState;
-use crate::cache::store::cache_key_wire;
+use crate::cache::{lfu::CachedResponse, store::cache_key_wire};
 use crate::config::DatabaseConfig;
-use crate::wire::types::{CacheCommandMetadata, SectionType};
+use crate::wire::messages::ClientMessageContent;
+use crate::wire::types::{PendingCommandExtended, PendingCommandSimple};
 use reader::{ByteReader, ByteReaderError, ByteReaderErrorKind};
+use writer::ByteWriter;
 //use state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
 use types::{
-    CacheCommand, ClientState, DBState, Portal, PreparedStatement, ProtocolState,
-    StateHandlingResult,
+    CacheCommand, ClientState, DBState, DescribeKind, PendingCommand, Portal, PreparedStatement,
+    ProtocolState, StateHandlingResult,
 };
 
 use messages::{
@@ -37,8 +41,8 @@ use messages::{
         BindMessage, DescribeMessage, ExecuteMessage, ParseMessage, QueryMessage, SyncMessage,
         TerminateMessage,
     },
-    DBMessageContent, DescribeMessageContent, ErrorResponseSeverity, ExecuteMessageContent,
-    ParseComplete, ParseMessageContent, QueryMessageContent,
+    DBMessageContent, DescribeMessageContent, DescribeMessageContentTarget, ErrorResponseSeverity,
+    ExecuteMessageContent, ParseComplete, ParseMessageContent, QueryMessageContent,
 };
 
 mod messages;
@@ -160,57 +164,12 @@ async fn handle_client(
     let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
     match reader.crawl_and_find_messages_client() {
         Ok(messages) => {
-            let mut cacheable_entries: Vec<CacheCommand> = Vec::new();
-            let mut message_number = 0;
-            let mut total_length = 0;
-            for message in messages {
-                match message {
-                    QueryMessage(content, length) => {
-                        message_number += 1;
-                        println!("query: {:?}", content.query);
-                        total_length = 0;
-                    }
-                    ParseMessage(content, length) => {
-                        let _ = parse_message(content, client_state).await;
-                        total_length += length;
-                    }
-                    BindMessage(content, length) => {
-                        let _ = bind_message(content, client_state).await;
-                        total_length += length;
-                    }
-                    ExecuteMessage(content, length) => {
-                        message_number += 1;
-                        total_length += length;
-                        match execute_message(content, client_state, message_number, total_length)
-                            .await
-                        {
-                            Ok(result) => match result {
-                                Some(result) => match result {
-                                    CacheCommand::Replay(value, message_number) => {
-                                        cacheable_entries
-                                            .push(CacheCommand::Replay(value, message_number));
-                                    }
-                                    CacheCommand::Capture(key, message_number) => {
-                                        cacheable_entries
-                                            .push(CacheCommand::Capture(key, message_number));
-                                    }
-                                },
-                                None => {
-                                    println!("should not be set in cache")
-                                }
-                            },
-                            Err(err) => {
-                                println!("error occured");
-                                let _ = err;
-                            }
-                        }
-                        total_length = 0;
-                    }
-                    _ => {}
-                }
-            }
-            if cacheable_entries.len() > 0 {
-                let _ = tx.send(cacheable_entries).await;
+            find_cache_related_messages(messages.clone(), client_state).await;
+            let (cache_commands, pending_commands) =
+                find_cache_related_messages(messages, client_state).await;
+
+            if cache_commands.len() > 0 && pending_commands.len() > 0 {
+                let _ = tx.send(cache_commands).await;
                 return;
             }
         }
@@ -250,10 +209,10 @@ async fn handle_db_read(
                             DBMessageContent::BindComplete => {
                                 println!("got BindComplete")
                             }
-                            DBMessageContent::RowDescription => {
+                            DBMessageContent::RowDescription(content) => {
                                 println!("got RowDescription")
                             }
-                            DBMessageContent::DataRow => {
+                            DBMessageContent::DataRow(content) => {
                                 println!("got DataRow")
                             }
                             DBMessageContent::CommandComplete => {
@@ -289,14 +248,13 @@ async fn handle_db_cached(
     client_write: &OwnedWriteHalf,
     buffer_data_length: &mut usize,
 ) -> Result<(), String> {
-    let mut buffer_data_length = 0;
     match cache_commands {
         Some(commands) => {
             for cache_command in commands {
                 match cache_command {
                     CacheCommand::Replay(bytes, message_number) => {
                         stream_try_write(&client_write, &bytes).await;
-                        println!("GOT CACHED RESPONSE TO DB SPAWN");
+                        println!("this is already cached");
                     }
                     CacheCommand::Capture(key, message_number) => {
                         println!("should cache this, {}", key)
@@ -326,68 +284,92 @@ pub(super) async fn stream_try_write(stream: &OwnedWriteHalf, buf: &[u8]) -> Opt
 }
 
 async fn parse_message(
-    content: ParseMessageContent,
+    content: &ParseMessageContent,
     client_state: &mut ClientState,
 ) -> Result<(), StateHandlingResult> {
-    let prepared_statement = PreparedStatement {
-        query: content.query,
-        parameter_data_types: content.parameter_data_types,
-    };
-    client_state
-        .prepared_statements
-        .insert(content.prepared_statement_name, prepared_statement);
+    if client_state
+        .app_state
+        .matcher
+        .template_exists(&content.query)
+    {
+        let prepared_statement = PreparedStatement {
+            query: content.query.clone(),
+            parameter_data_types: content.parameter_data_types.clone(),
+        };
+        client_state
+            .prepared_statements
+            .insert(content.prepared_statement_name.clone(), prepared_statement);
 
-    println!("saved in prepared statement");
+        println!("saved in prepared statement");
+    }
     Ok(())
 }
 
 async fn bind_message(
-    content: BindMessageContent,
+    content: &BindMessageContent,
     client_state: &mut ClientState,
 ) -> Result<(), StateHandlingResult> {
-    let portal = Portal {
-        source_prepared_statement_name: content.source_prepared_statement_name,
-        parameter_format_codes: content.parameter_format_codes,
-        parameter_values: content.parameter_values,
-        result_column_format_codes: content.result_column_format_codes,
+    if let Some(prepared_statement) = client_state
+        .prepared_statements
+        .get(&content.source_prepared_statement_name)
+    {
+        if client_state
+            .app_state
+            .matcher
+            .template_exists(&prepared_statement.query)
+        {
+            let portal = Portal {
+                source_prepared_statement_name: content.source_prepared_statement_name.clone(),
+                parameter_format_codes: content.parameter_format_codes.clone(),
+                parameter_values: content.parameter_values.clone(),
+                result_column_format_codes: content.result_column_format_codes.clone(),
+            };
+            client_state
+                .portals
+                .insert(content.portal_name.clone(), portal);
+        }
+        println!("saved in portals");
     };
-    client_state.portals.insert(content.portal_name, portal);
-    println!("saved in portals");
     Ok(())
+}
+
+fn describe_message(content: &DescribeMessageContent) -> DescribeKind {
+    match content.target {
+        DescribeMessageContentTarget::PreparedStatement => DescribeKind::Statement,
+        DescribeMessageContentTarget::Portal => DescribeKind::Portal,
+    }
 }
 
 async fn execute_message(
     content: ExecuteMessageContent,
     client_state: &mut ClientState,
-    message_number: i32,
-    total_length: usize,
+    order: u16,
+    describe_kind: &DescribeKind,
 ) -> Result<Option<CacheCommand>, StateHandlingResult> {
-    let cache_key = match is_cache_configured(content, client_state) {
-        Some(cache_key) => cache_key,
-        None => return Ok(None),
-    };
+    // if a row limit is set, then we can't really cache the result(this is not affected by 'LIMIT')
+    if content.rows_to_return_limit > 0 {
+        let cache_key = match is_cache_configured(&content, client_state) {
+            Some(cache_key) => cache_key,
+            None => return Ok(None),
+        };
 
-    return Ok(match get_from_cache(client_state, &cache_key) {
-        Some(value) => Some(CacheCommand::Replay(
-            value,
-            CacheCommandMetadata {
-                section_type: SectionType::ExtendedQuery,
-                length: total_length,
-                message_number,
-            },
-        )),
-        None => Some(CacheCommand::Capture(
-            cache_key,
-            CacheCommandMetadata {
-                section_type: SectionType::ExtendedQuery,
-                length: total_length,
-                message_number,
-            },
-        )),
-    });
+        return Ok(match get_from_cache(client_state, &cache_key) {
+            Some(data) => Some(CacheCommand::Replay {
+                data,
+                order,
+                describe_kind: describe_kind.clone(),
+            }),
+            None => Some(CacheCommand::Capture {
+                key: cache_key,
+                order,
+                describe_kind: describe_kind.clone(),
+            }),
+        });
+    }
+    Ok(None)
 }
 
-fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Vec<u8>> {
+fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedResponse>> {
     return client_state.app_state.cache.get(&key);
 }
 
@@ -403,7 +385,7 @@ fn set_in_cache(app_state: &AppState, query: &str, key: &str, result: Vec<u8>) {
 }
 
 fn is_cache_configured(
-    content: ExecuteMessageContent,
+    content: &ExecuteMessageContent,
     client_state: &mut ClientState,
 ) -> Option<String> {
     let portal = match client_state.portals.get(&content.name) {
@@ -428,4 +410,192 @@ fn is_cache_configured(
         ));
     }
     None
+}
+fn is_cache_configured_simple(query: &String, client_state: &mut ClientState) -> Option<String> {
+    if client_state.app_state.matcher.template_exists(&query) {
+        return Some(cache_key_wire(&query, &Vec::new()));
+    }
+    None
+}
+
+async fn find_cache_related_messages(
+    messages: Vec<ClientMessageContent>,
+    client_state: &mut ClientState,
+) -> (Vec<CacheCommand>, Vec<PendingCommand>) {
+    let mut cache_commands: Vec<CacheCommand> = Vec::new();
+    let mut pending_commands: Vec<PendingCommand> = Vec::new();
+    let mut parse_messages: Vec<(ParseMessageContent, usize, usize)> = Vec::new();
+    let mut bind_messages: Vec<(BindMessageContent, usize, usize)> = Vec::new();
+    let mut describe_messages: Vec<(DescribeMessageContent, usize, usize)> = Vec::new();
+    let mut order = 0;
+    for message in messages {
+        match message {
+            QueryMessage { data, start, end } => 'query: {
+                order += 1;
+                let cache_key = match is_cache_configured_simple(&data.query, client_state) {
+                    Some(cache_key) => cache_key,
+                    None => break 'query,
+                };
+                let cache_command = match get_from_cache(client_state, &cache_key) {
+                    Some(data) => CacheCommand::Replay {
+                        data,
+                        order,
+                        describe_kind: DescribeKind::None,
+                    },
+                    None => CacheCommand::Capture {
+                        key: cache_key,
+                        order,
+                        describe_kind: DescribeKind::None,
+                    },
+                };
+                let pending_command = PendingCommandSimple {
+                    query: start..end,
+                    action: cache_command.clone(),
+                };
+                cache_commands.push(cache_command);
+                pending_commands.push(PendingCommand::Simple(pending_command));
+            }
+            ParseMessage { data, start, end } => {
+                let _ = parse_message(&data, client_state).await;
+                parse_messages.push((data, start, end));
+            }
+            BindMessage { data, start, end } => {
+                let _ = bind_message(&data, client_state).await;
+                bind_messages.push((data, start, end));
+            }
+            DescribeMessage { data, start, end } => {
+                let _ = describe_message(&data);
+                describe_messages.push((data, start, end));
+            }
+            ExecuteMessage { data, start, end } => 'execute: {
+                order += 1;
+                if data.rows_to_return_limit > 0 {
+                    let cache_key = match is_cache_configured(&data, client_state) {
+                        Some(cache_key) => cache_key,
+                        None => break 'execute,
+                    };
+                    let cache_response = get_from_cache(client_state, &cache_key);
+                    let describe_kind: DescribeKind;
+                    let mut paired_parse_message = None;
+                    let mut paired_bind_message = None;
+                    let mut paired_describe_message = None;
+                    if cache_response.is_some() {
+                        let portal_name = &data.name;
+                        'find_bind: for (index, current_bind_message) in
+                            bind_messages.clone().iter().enumerate()
+                        {
+                            if &current_bind_message.0.portal_name == portal_name {
+                                paired_bind_message = Some(current_bind_message.clone());
+                                bind_messages.remove(index);
+                                'find_parse: for (index, current_parse_message) in
+                                    parse_messages.clone().iter().enumerate()
+                                {
+                                    if current_parse_message.0.prepared_statement_name
+                                        == current_bind_message.0.source_prepared_statement_name
+                                    {
+                                        paired_parse_message = Some(current_parse_message.clone());
+                                        parse_messages.remove(index);
+                                        break 'find_parse;
+                                    }
+                                }
+
+                                break 'find_bind;
+                            }
+                        }
+                    }
+
+                    'find_describe: for (index, current_describe_message) in
+                        describe_messages.clone().iter().enumerate()
+                    {
+                        match current_describe_message.0.target {
+                            DescribeMessageContentTarget::Portal => {
+                                if get_portal_in_session(
+                                    &current_describe_message.0.name,
+                                    client_state,
+                                )
+                                .is_some()
+                                {
+                                    paired_describe_message =
+                                        Some(current_describe_message.clone());
+                                    describe_messages.remove(index);
+                                    break 'find_describe;
+                                }
+                            }
+                            DescribeMessageContentTarget::PreparedStatement => {
+                                if get_prepared_statement_in_session(
+                                    &current_describe_message.0.name,
+                                    client_state,
+                                )
+                                .is_some()
+                                {
+                                    paired_describe_message =
+                                        Some(current_describe_message.clone());
+                                    describe_messages.remove(index);
+                                    break 'find_describe;
+                                }
+                            }
+                        }
+                    }
+                    describe_kind = match &paired_describe_message {
+                        Some(data) => describe_message(&data.0),
+                        None => DescribeKind::None,
+                    };
+
+                    let cache_command = match cache_response {
+                        Some(data) => CacheCommand::Replay {
+                            data,
+                            order,
+                            describe_kind,
+                        },
+                        None => CacheCommand::Capture {
+                            key: cache_key,
+                            order,
+                            describe_kind,
+                        },
+                    };
+
+                    let pending_command = PendingCommandExtended {
+                        execute: Range { start, end },
+                        parse: {
+                            if let Some(parse) = paired_parse_message {
+                                Some(parse.1..parse.2)
+                            } else {
+                                None
+                            }
+                        },
+                        bind: {
+                            if let Some(bind) = paired_bind_message {
+                                Some(bind.1..bind.2)
+                            } else {
+                                None
+                            }
+                        },
+                        describe: {
+                            if let Some(describe) = paired_describe_message {
+                                Some(describe.1..describe.2)
+                            } else {
+                                None
+                            }
+                        },
+                        action: cache_command.clone(),
+                    };
+                    cache_commands.push(cache_command);
+                    pending_commands.push(PendingCommand::Extended(pending_command));
+                }
+            }
+            _ => {}
+        }
+    }
+    return (cache_commands, pending_commands);
+}
+
+fn get_prepared_statement_in_session<'a>(
+    name: &str,
+    client_state: &'a mut ClientState,
+) -> Option<&'a PreparedStatement> {
+    client_state.prepared_statements.get(name)
+}
+
+fn get_portal_in_session<'a>(name: &str, client_state: &'a mut ClientState) -> Option<&'a Portal> {
+    client_state.portals.get(name)
 }

@@ -78,64 +78,69 @@ impl<'a> ByteReader<'a> {
             }
             let type_byte = &self.buffer[self.cursor];
             self.cursor += 1;
-            let slice_end_index = self.read_i32_as_usize()? - 4;
+            let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {
                 b'Q' => {
                     let decoded = Query {
-                        bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
+                        bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::QueryMessage(
-                        decoded,
-                        slice_end_index - self.cursor,
-                    ))
+                    messages.push(ClientMessageContent::QueryMessage {
+                        data: decoded,
+                        start: self.cursor,
+                        end: self.cursor + slice_length,
+                    })
                 }
                 b'P' => {
                     let decoded = Parse {
-                        bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
+                        bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::ParseMessage(
-                        decoded,
-                        slice_end_index - self.cursor,
-                    ))
+                    messages.push(ClientMessageContent::ParseMessage {
+                        data: decoded,
+                        start: self.cursor,
+                        end: self.cursor + slice_length,
+                    })
                 } // Parse
                 b'B' => {
                     let decoded = Bind {
-                        bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
+                        bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::BindMessage(
-                        decoded,
-                        slice_end_index - self.cursor,
-                    ))
+                    messages.push(ClientMessageContent::BindMessage {
+                        data: decoded,
+                        start: self.cursor,
+                        end: self.cursor + slice_length,
+                    })
                 }
                 b'D' => {
                     let decoded = Describe {
-                        bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
+                        bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::DescribeMessage(
-                        decoded,
-                        slice_end_index - self.cursor,
-                    ))
+                    messages.push(ClientMessageContent::DescribeMessage {
+                        data: decoded,
+                        start: self.cursor,
+                        end: self.cursor + slice_length,
+                    })
                 } // Describe
                 b'E' => {
                     let decoded = Execute {
-                        bytes: self.buffer[self.cursor..(self.cursor + slice_end_index)].to_vec(),
+                        bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
                     }
                     .decode()?;
-                    messages.push(ClientMessageContent::ExecuteMessage(
-                        decoded,
-                        slice_end_index - self.cursor,
-                    ))
+                    messages.push(ClientMessageContent::ExecuteMessage {
+                        data: decoded,
+                        start: self.cursor,
+                        end: self.cursor + slice_length,
+                    })
                 } // Execute
                 b'S' => messages.push(ClientMessageContent::SyncMessage), // Sync
                 b'C' => println!("identification byte: 'Close'"),         // Close
                 b'X' => messages.push(ClientMessageContent::TerminateMessage), // Terminate
                 _ => messages.push(ClientMessageContent::UnknownMessage),
             }
-            self.cursor += slice_end_index;
+            self.cursor += slice_length;
         }
 
         Ok(messages)
@@ -153,8 +158,14 @@ impl<'a> ByteReader<'a> {
             self.cursor += 1;
             let slice_end_index = self.read_i32_as_usize()? - 4;
             match type_byte {
-                b'T' => messages.push(DBMessageContent::RowDescription),
-                b'D' => messages.push(DBMessageContent::DataRow),
+                b'T' => {
+                    let bytes = self.buffer[self.cursor..slice_end_index].to_vec();
+                    messages.push(DBMessageContent::RowDescription(bytes))
+                }
+                b'D' => {
+                    let bytes = self.buffer[self.cursor..slice_end_index].to_vec();
+                    messages.push(DBMessageContent::DataRow(bytes))
+                }
                 b'C' => messages.push(DBMessageContent::CommandComplete),
                 b'Z' => messages.push(DBMessageContent::ReadyForQuery),
                 b'R' => messages.push(DBMessageContent::AuthenticationOk),
