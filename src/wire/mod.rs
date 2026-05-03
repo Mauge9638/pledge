@@ -468,7 +468,7 @@ async fn find_cache_related_messages(
             }
             ExecuteMessage { data, start, end } => 'execute: {
                 order += 1;
-                if data.rows_to_return_limit > 0 {
+                if data.rows_to_return_limit == 0 {
                     let cache_key = match is_cache_configured(&data, client_state) {
                         Some(cache_key) => cache_key,
                         None => break 'execute,
