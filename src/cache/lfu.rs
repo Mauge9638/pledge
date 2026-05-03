@@ -173,7 +173,19 @@ impl Entry {
 
 #[derive(Debug)]
 pub struct CachedResponse {
-    pub(super) param_desc: Option<Vec<u8>>,
-    pub(super) row_desc: Option<Vec<u8>>,
-    pub(super) data: Vec<u8>,
+    pub(crate) param_desc: Option<Vec<u8>>,
+    pub(crate) row_desc: Option<Vec<u8>>,
+    pub(crate) data: Vec<u8>,
+}
+
+impl CachedResponse {
+    pub fn has_data(&self) -> bool {
+        !self.data.is_empty()
+    }
+    pub fn has_row_desc(&self) -> bool {
+        self.row_desc.is_some()
+    }
+    pub fn has_param_desc(&self) -> bool {
+        self.param_desc.is_some()
+    }
 }

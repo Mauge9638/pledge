@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Error};
 use std::ops::Range;
 use std::sync::Arc;
@@ -26,13 +26,13 @@ use crate::AppState;
 use crate::cache::{lfu::CachedResponse, store::cache_key_wire};
 use crate::config::DatabaseConfig;
 use crate::wire::messages::ClientMessageContent;
-use crate::wire::types::{PendingCommandExtended, PendingCommandSimple};
+use crate::wire::types::{ProtocolMode, ReplayTrimExtended, ReplayTrimSimple};
 use reader::{ByteReader, ByteReaderError, ByteReaderErrorKind};
 use writer::ByteWriter;
 //use state_handling::{ready_for_query, waiting_for_ssl, waiting_for_startup};
 use types::{
-    CacheCommand, ClientState, DBState, DescribeKind, PendingCommand, Portal, PreparedStatement,
-    ProtocolState, StateHandlingResult,
+    CacheCommand, ClientState, DBState, DescribeKind, Portal, PreparedStatement, ProtocolState,
+    ReplayTrim, StateHandlingResult,
 };
 
 use messages::{
@@ -136,15 +136,15 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
             buffer_data_length = 0;
 
             tokio::select! {
-                result = db_read.read(&mut db_state.buffer[buffer_data_length..]) => {
-                    if let Err(e) = handle_db_read(&result, &mut db_state, &client_write, &mut buffer_data_length).await {
-                        eprintln!("db read failed: {e}");
+                biased; Some(cache_commands) = rx.recv() => {
+                    if let Err(e) = handle_db_cached(cache_commands,&mut db_state, &client_write, &mut buffer_data_length).await {
+                        eprintln!("cache handling failed: {e}");
                         break 'outerLoop;
                     }
                 }
-                cache_commands = rx.recv() => {
-                    if let Err(e) = handle_db_cached(cache_commands,&mut db_state, &client_write, &mut buffer_data_length).await {
-                        eprintln!("cache handling failed: {e}");
+                result = db_read.read(&mut db_state.buffer[buffer_data_length..]) => {
+                    if let Err(e) = handle_db_read(&result, &mut db_state, &client_write, &mut buffer_data_length).await {
+                        eprintln!("db read failed: {e}");
                         break 'outerLoop;
                     }
                 }
@@ -159,21 +159,25 @@ async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
     buffer_data_length: usize,
-    tx: &Sender<Vec<CacheCommand>>,
+    tx: &Sender<BTreeMap<u16, CacheCommand>>,
 ) {
     let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
-    match reader.crawl_and_find_messages_client() {
-        Ok(messages) => {
-            find_cache_related_messages(messages.clone(), client_state).await;
-            let (cache_commands, pending_commands) =
-                find_cache_related_messages(messages, client_state).await;
-
-            if cache_commands.len() > 0 && pending_commands.len() > 0 {
-                let _ = tx.send(cache_commands).await;
-                return;
-            }
+    if let Ok(messages) = reader.crawl_and_find_messages_client() {
+        let (cache_commands, replay_trims) =
+            find_cache_related_messages(messages, client_state).await;
+        if replay_trims.len() > 0 {
+            let mut writer = ByteWriter::new(&mut client_state.buffer, 0);
+            writer.trim_from_pending_commands(replay_trims);
         }
-        Err(_) => {}
+        if cache_commands.keys().len() > 0 {
+            println!("has cache commands");
+            println!("has cache commands");
+            println!("has cache commands");
+            println!("has cache commands");
+            println!("has cache commands");
+            let _ = tx.send(cache_commands).await;
+            return;
+        }
     }
     stream_try_write(&db_write, &client_state.buffer[..buffer_data_length]).await;
 }
@@ -243,11 +247,22 @@ async fn handle_db_read(
 }
 
 async fn handle_db_cached(
-    cache_commands: Option<Vec<CacheCommand>>,
+    cache_commands: BTreeMap<u16, CacheCommand>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     buffer_data_length: &mut usize,
 ) -> Result<(), String> {
+    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
+    for (_, command) in cache_commands {
+        match command {
+            CacheCommand::Replay { data, .. } => {
+                println!("{:?}", data);
+            }
+            CacheCommand::Capture { key, .. } => {
+                println!("{:?}", key);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -324,41 +339,43 @@ fn describe_message(content: &DescribeMessageContent) -> DescribeKind {
     }
 }
 
-async fn execute_message(
-    content: ExecuteMessageContent,
-    client_state: &mut ClientState,
-    order: u16,
-    describe_kind: &DescribeKind,
-) -> Result<Option<CacheCommand>, StateHandlingResult> {
-    // if a row limit is set, then we can't really cache the result(this is not affected by 'LIMIT')
-    if content.rows_to_return_limit > 0 {
-        let cache_key = match is_cache_configured(&content, client_state) {
-            Some(cache_key) => cache_key,
-            None => return Ok(None),
-        };
+// async fn execute_message(
+//     content: ExecuteMessageContent,
+//     client_state: &mut ClientState,
+//     order: u16,
+//     describe_kind: &DescribeKind,
+// ) -> Result<Option<CacheCommand>, StateHandlingResult> {
+//     // if a row limit is set, then we can't really cache the result(this is not affected by 'LIMIT')
+//     if content.rows_to_return_limit > 0 {
+//         let cache_key = match is_cache_configured(&content, client_state) {
+//             Some(cache_key) => cache_key,
+//             None => return Ok(None),
+//         };
 
-        return Ok(match get_from_cache(client_state, &cache_key) {
-            Some(data) => Some(CacheCommand::Replay {
-                data,
-                order,
-                describe_kind: describe_kind.clone(),
-            }),
-            None => Some(CacheCommand::Capture {
-                key: cache_key,
-                order,
-                describe_kind: describe_kind.clone(),
-            }),
-        });
-    }
-    Ok(None)
-}
+//         return Ok(match get_from_cache(client_state, &cache_key) {
+//             Some(data) => Some(CacheCommand::Replay {
+//                 data,
+//                 order,
+//                 describe_kind: describe_kind.clone(),
+//                 protocol_mode: ProtocolMode::Extended,
+//             }),
+//             None => Some(CacheCommand::Capture {
+//                 key: cache_key,
+//                 order,
+//                 describe_kind: describe_kind.clone(),
+//                 protocol_mode: ProtocolMode::Extended,
+//             }),
+//         });
+//     }
+//     Ok(None)
+// }
 
 fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedResponse>> {
     return client_state.app_state.cache.get(&key);
 }
 
 fn set_in_cache(app_state: &AppState, query: &str, key: &str, data: CachedResponse) {
-    println!("cache_key set: {}", query);
+    println!("cache_key set: {}", key);
     if let Some(template) = app_state.matcher.find_template(query) {
         let expiration = match template.ttl {
             Some(ttl) => Instant::now() + Duration::from_secs(ttl),
@@ -405,9 +422,9 @@ fn is_cache_configured_simple(query: &String, client_state: &mut ClientState) ->
 async fn find_cache_related_messages(
     messages: Vec<ClientMessageContent>,
     client_state: &mut ClientState,
-) -> (Vec<CacheCommand>, Vec<PendingCommand>) {
-    let mut cache_commands: Vec<CacheCommand> = Vec::new();
-    let mut pending_commands: Vec<PendingCommand> = Vec::new();
+) -> (BTreeMap<u16, CacheCommand>, Vec<ReplayTrim>) {
+    let mut cache_commands: BTreeMap<u16, CacheCommand> = BTreeMap::new();
+    let mut replay_trims: Vec<ReplayTrim> = Vec::new();
     let mut parse_messages: Vec<(ParseMessageContent, usize, usize)> = Vec::new();
     let mut bind_messages: Vec<(BindMessageContent, usize, usize)> = Vec::new();
     let mut describe_messages: Vec<(DescribeMessageContent, usize, usize)> = Vec::new();
@@ -423,21 +440,19 @@ async fn find_cache_related_messages(
                 let cache_command = match get_from_cache(client_state, &cache_key) {
                     Some(data) => CacheCommand::Replay {
                         data,
-                        order,
                         describe_kind: DescribeKind::None,
+                        protocol_mode: ProtocolMode::Simple,
+                        synthesize_ready_for_query: true,
                     },
                     None => CacheCommand::Capture {
                         key: cache_key,
-                        order,
                         describe_kind: DescribeKind::None,
+                        protocol_mode: ProtocolMode::Simple,
+                        synthesize_ready_for_query: true,
                     },
                 };
-                let pending_command = PendingCommandSimple {
-                    query: start..end,
-                    action: cache_command.clone(),
-                };
-                cache_commands.push(cache_command);
-                pending_commands.push(PendingCommand::Simple(pending_command));
+                cache_commands.insert(order, cache_command);
+                replay_trims.push(ReplayTrim::Simple(ReplayTrimSimple { query: start..end }));
             }
             ParseMessage { data, start, end } => {
                 let _ = parse_message(&data, client_state).await;
@@ -502,15 +517,19 @@ async fn find_cache_related_messages(
                     };
 
                     let cache_command = match &cache_response {
-                        Some(data) => CacheCommand::Replay {
-                            data: data.clone(),
-                            order,
-                            describe_kind,
-                        },
-                        None => CacheCommand::Capture {
+                        Some(data) if cache_data_can_satisfy(data, &describe_kind) => {
+                            CacheCommand::Replay {
+                                data: data.clone(),
+                                describe_kind,
+                                protocol_mode: ProtocolMode::Extended,
+                                synthesize_ready_for_query: false,
+                            }
+                        }
+                        _ => CacheCommand::Capture {
                             key: cache_key,
-                            order,
                             describe_kind,
+                            protocol_mode: ProtocolMode::Extended,
+                            synthesize_ready_for_query: false,
                         },
                     };
 
@@ -539,39 +558,39 @@ async fn find_cache_related_messages(
                         }
                     }
 
-                    let pending_command = PendingCommandExtended {
-                        execute: Range { start, end },
-                        parse: {
-                            if let Some(parse) = paired_parse_message {
-                                Some(parse.1..parse.2)
-                            } else {
-                                None
-                            }
-                        },
-                        bind: {
-                            if let Some(bind) = paired_bind_message {
-                                Some(bind.1..bind.2)
-                            } else {
-                                None
-                            }
-                        },
-                        describe: {
-                            if let Some(describe) = paired_describe_message {
-                                Some(describe.1..describe.2)
-                            } else {
-                                None
-                            }
-                        },
-                        action: cache_command.clone(),
-                    };
-                    cache_commands.push(cache_command.clone());
-                    pending_commands.push(PendingCommand::Extended(pending_command));
+                    cache_commands.insert(order, cache_command.clone());
+                    if let CacheCommand::Replay { .. } = cache_command {
+                        replay_trims.push(ReplayTrim::Extended(ReplayTrimExtended {
+                            execute: Range { start, end },
+                            parse: {
+                                if let Some(parse) = paired_parse_message {
+                                    Some(parse.1..parse.2)
+                                } else {
+                                    None
+                                }
+                            },
+                            bind: {
+                                if let Some(bind) = paired_bind_message {
+                                    Some(bind.1..bind.2)
+                                } else {
+                                    None
+                                }
+                            },
+                            describe: {
+                                if let Some(describe) = paired_describe_message {
+                                    Some(describe.1..describe.2)
+                                } else {
+                                    None
+                                }
+                            },
+                        }));
+                    }
                 }
             }
             _ => {}
         }
     }
-    return (cache_commands, pending_commands);
+    return (cache_commands, replay_trims);
 }
 
 fn get_prepared_statement_in_session<'a>(
@@ -583,4 +602,14 @@ fn get_prepared_statement_in_session<'a>(
 
 fn get_portal_in_session<'a>(name: &str, client_state: &'a mut ClientState) -> Option<&'a Portal> {
     client_state.portals.get(name)
+}
+
+fn cache_data_can_satisfy(response: &CachedResponse, kind: &DescribeKind) -> bool {
+    match kind {
+        DescribeKind::None => response.has_data(),
+        DescribeKind::Portal => response.has_data() && response.has_row_desc(),
+        DescribeKind::Statement => {
+            response.has_data() && response.has_row_desc() && response.has_param_desc()
+        }
+    }
 }

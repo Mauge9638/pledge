@@ -83,16 +83,24 @@ pub(super) struct Portal {
 }
 
 #[derive(Clone)]
+pub(super) enum ProtocolMode {
+    Simple,
+    Extended,
+}
+
+#[derive(Clone)]
 pub(super) enum CacheCommand {
     Replay {
         data: Arc<CachedResponse>,
-        order: u16,
         describe_kind: DescribeKind,
+        protocol_mode: ProtocolMode,
+        synthesize_ready_for_query: bool,
     }, // cache hit: write these to client, skip DB
     Capture {
         key: String,
-        order: u16,
         describe_kind: DescribeKind,
+        protocol_mode: ProtocolMode,
+        synthesize_ready_for_query: bool,
     }, // cache miss: next DB response belongs to this key
 }
 
@@ -103,36 +111,29 @@ pub(super) enum DescribeKind {
     Statement,
 }
 
-pub(super) enum PendingCommand {
-    Extended(PendingCommandExtended),
-    Simple(PendingCommandSimple),
+pub(super) enum ReplayTrim {
+    Extended(ReplayTrimExtended),
+    Simple(ReplayTrimSimple),
 }
 
-pub(super) struct PendingCommandExtended {
+pub(super) struct ReplayTrimExtended {
     pub execute: Range<usize>,
     pub parse: Option<Range<usize>>,
     pub bind: Option<Range<usize>>,
     pub describe: Option<Range<usize>>,
-    pub action: CacheCommand,
 }
 
-impl PendingCommandExtended {
+impl ReplayTrimExtended {
     pub fn new() -> Self {
         Self {
             execute: 0..0,
             parse: None,
             bind: None,
             describe: None,
-            action: CacheCommand::Capture {
-                key: String::new(),
-                order: 0,
-                describe_kind: DescribeKind::None,
-            },
         }
     }
 }
 
-pub(super) struct PendingCommandSimple {
+pub(super) struct ReplayTrimSimple {
     pub query: Range<usize>,
-    pub action: CacheCommand,
 }

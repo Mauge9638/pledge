@@ -87,7 +87,7 @@ impl<'a> ByteReader<'a> {
                     .decode()?;
                     messages.push(ClientMessageContent::QueryMessage {
                         data: decoded,
-                        start: self.cursor,
+                        start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
                 }
@@ -98,7 +98,7 @@ impl<'a> ByteReader<'a> {
                     .decode()?;
                     messages.push(ClientMessageContent::ParseMessage {
                         data: decoded,
-                        start: self.cursor,
+                        start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
                 } // Parse
@@ -109,7 +109,7 @@ impl<'a> ByteReader<'a> {
                     .decode()?;
                     messages.push(ClientMessageContent::BindMessage {
                         data: decoded,
-                        start: self.cursor,
+                        start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
                 }
@@ -120,7 +120,7 @@ impl<'a> ByteReader<'a> {
                     .decode()?;
                     messages.push(ClientMessageContent::DescribeMessage {
                         data: decoded,
-                        start: self.cursor,
+                        start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
                 } // Describe
@@ -131,7 +131,7 @@ impl<'a> ByteReader<'a> {
                     .decode()?;
                     messages.push(ClientMessageContent::ExecuteMessage {
                         data: decoded,
-                        start: self.cursor,
+                        start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
                 } // Execute
@@ -156,14 +156,14 @@ impl<'a> ByteReader<'a> {
             }
             let type_byte = &self.buffer[self.cursor];
             self.cursor += 1;
-            let slice_end_index = self.read_i32_as_usize()? - 4;
+            let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {
                 b'T' => {
-                    let bytes = self.buffer[self.cursor..slice_end_index].to_vec();
+                    let bytes = self.buffer[self.cursor..(self.cursor + slice_length)].to_vec();
                     messages.push(DBMessageContent::RowDescription(bytes))
                 }
                 b'D' => {
-                    let bytes = self.buffer[self.cursor..slice_end_index].to_vec();
+                    let bytes = self.buffer[self.cursor..(self.cursor + slice_length)].to_vec();
                     messages.push(DBMessageContent::DataRow(bytes))
                 }
                 b'C' => messages.push(DBMessageContent::CommandComplete),
@@ -173,7 +173,7 @@ impl<'a> ByteReader<'a> {
                 b'2' => messages.push(DBMessageContent::BindComplete),
                 _ => messages.push(DBMessageContent::UnknownMessage),
             }
-            self.cursor += slice_end_index;
+            self.cursor += slice_length;
         }
         Ok(messages)
     }
