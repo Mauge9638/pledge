@@ -94,13 +94,11 @@ pub(super) enum CacheCommand {
         data: Arc<CachedResponse>,
         describe_kind: DescribeKind,
         protocol_mode: ProtocolMode,
-        synthesize_ready_for_query: bool,
     }, // cache hit: write these to client, skip DB
     Capture {
         key: String,
         describe_kind: DescribeKind,
         protocol_mode: ProtocolMode,
-        synthesize_ready_for_query: bool,
     }, // cache miss: next DB response belongs to this key
 }
 

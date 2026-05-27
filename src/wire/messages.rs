@@ -261,10 +261,11 @@ pub(super) enum ClientMessageContent {
 pub(super) enum DBMessageContent {
     ParseComplete,
     BindComplete,
+    ParameterDescription(Vec<u8>),
     RowDescription(Vec<u8>),
     DataRow(Vec<u8>),
     CommandComplete,
-    ReadyForQuery,
+    ReadyForQuery(String),
     AuthenticationOk,
     UnknownMessage,
 }

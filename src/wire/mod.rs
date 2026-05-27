@@ -137,7 +137,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
 
             tokio::select! {
                 biased; Some(cache_commands) = rx.recv() => {
-                    if let Err(e) = handle_db_cached(cache_commands,&mut db_state, &client_write, &mut buffer_data_length).await {
+                    if let Err(e) = handle_db_cache_command(cache_commands, &mut db_state, &client_write, &mut db_read, &mut buffer_data_length).await {
                         eprintln!("cache handling failed: {e}");
                         break 'outerLoop;
                     }
@@ -165,18 +165,20 @@ async fn handle_client(
     if let Ok(messages) = reader.crawl_and_find_messages_client() {
         let (cache_commands, replay_trims) =
             find_cache_related_messages(messages, client_state).await;
+
         if replay_trims.len() > 0 {
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
             let mut writer = ByteWriter::new(&mut client_state.buffer, 0);
             writer.trim_from_pending_commands(replay_trims);
         }
         if cache_commands.keys().len() > 0 {
-            println!("has cache commands");
-            println!("has cache commands");
-            println!("has cache commands");
-            println!("has cache commands");
-            println!("has cache commands");
+            for (key, command) in cache_commands.iter() {
+                println!("cache command: key/order={}", key);
+            }
             let _ = tx.send(cache_commands).await;
-            return;
         }
     }
     stream_try_write(&db_write, &client_state.buffer[..buffer_data_length]).await;
@@ -213,6 +215,9 @@ async fn handle_db_read(
                             DBMessageContent::BindComplete => {
                                 println!("got BindComplete")
                             }
+                            DBMessageContent::ParameterDescription(content) => {
+                                println!("got RowDescription")
+                            }
                             DBMessageContent::RowDescription(content) => {
                                 println!("got RowDescription")
                             }
@@ -222,8 +227,8 @@ async fn handle_db_read(
                             DBMessageContent::CommandComplete => {
                                 println!("got CommandComplete")
                             }
-                            DBMessageContent::ReadyForQuery => {
-                                println!("got ReadyForQuery")
+                            DBMessageContent::ReadyForQuery(status) => {
+                                println!("got ReadyForQuery with status: {}", status)
                             }
                             DBMessageContent::AuthenticationOk => {
                                 println!("got AuthenticationOk")
@@ -246,22 +251,57 @@ async fn handle_db_read(
     }
 }
 
-async fn handle_db_cached(
+async fn handle_db_cache_command(
     cache_commands: BTreeMap<u16, CacheCommand>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
+    db_read: &mut OwnedReadHalf,
     buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
-    for (_, command) in cache_commands {
+    let mut has_cache_miss: bool = false;
+
+    stream_try_write(&client_write, &db_state.buffer[..*buffer_data_length]).await;
+
+    for (_, command) in &cache_commands {
         match command {
             CacheCommand::Replay { data, .. } => {
-                println!("{:?}", data);
+                println!("replay: {:?}", data);
             }
             CacheCommand::Capture { key, .. } => {
-                println!("{:?}", key);
+                println!("capture: {:?}", key);
+                has_cache_miss = true;
+                break;
             }
         }
+    }
+    match db_read
+        .read(&mut db_state.buffer[*buffer_data_length..])
+        .await
+    {
+        Ok(n) => {
+            *buffer_data_length += n;
+            'innerLoop: loop {
+                if *buffer_data_length == 0 {
+                    break 'innerLoop;
+                }
+                if *buffer_data_length >= db_state.buffer.len() {
+                    println!("Resizing db buffer");
+                    db_state.buffer.resize(db_state.buffer.len() * 2, 0);
+                } else {
+                    break 'innerLoop;
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("Error occurred: {}", err);
+            return Err(err.to_string());
+        }
+    }
+    if has_cache_miss {
+        let mut writer = ByteWriter::new(&mut db_state.buffer, 0);
+    } else {
+        stream_try_write(client_write, &db_state.buffer).await;
     }
     Ok(())
 }
@@ -442,13 +482,11 @@ async fn find_cache_related_messages(
                         data,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
-                        synthesize_ready_for_query: true,
                     },
                     None => CacheCommand::Capture {
                         key: cache_key,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
-                        synthesize_ready_for_query: true,
                     },
                 };
                 cache_commands.insert(order, cache_command);
@@ -522,14 +560,12 @@ async fn find_cache_related_messages(
                                 data: data.clone(),
                                 describe_kind,
                                 protocol_mode: ProtocolMode::Extended,
-                                synthesize_ready_for_query: false,
                             }
                         }
                         _ => CacheCommand::Capture {
                             key: cache_key,
                             describe_kind,
                             protocol_mode: ProtocolMode::Extended,
-                            synthesize_ready_for_query: false,
                         },
                     };
 

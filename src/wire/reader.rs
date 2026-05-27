@@ -101,7 +101,7 @@ impl<'a> ByteReader<'a> {
                         start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
-                } // Parse
+                }
                 b'B' => {
                     let decoded = Bind {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
@@ -123,7 +123,7 @@ impl<'a> ByteReader<'a> {
                         start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
-                } // Describe
+                }
                 b'E' => {
                     let decoded = Execute {
                         bytes: self.buffer[self.cursor..(self.cursor + slice_length)].to_vec(),
@@ -134,7 +134,7 @@ impl<'a> ByteReader<'a> {
                         start: self.cursor - 5,
                         end: self.cursor + slice_length,
                     })
-                } // Execute
+                }
                 b'S' => messages.push(ClientMessageContent::SyncMessage), // Sync
                 b'C' => println!("identification byte: 'Close'"),         // Close
                 b'X' => messages.push(ClientMessageContent::TerminateMessage), // Terminate
@@ -158,16 +158,26 @@ impl<'a> ByteReader<'a> {
             self.cursor += 1;
             let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {
+                b't' => {
+                    let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
+                    messages.push(DBMessageContent::ParameterDescription(bytes))
+                }
                 b'T' => {
-                    let bytes = self.buffer[self.cursor..(self.cursor + slice_length)].to_vec();
+                    let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
                     messages.push(DBMessageContent::RowDescription(bytes))
                 }
                 b'D' => {
-                    let bytes = self.buffer[self.cursor..(self.cursor + slice_length)].to_vec();
+                    let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
                     messages.push(DBMessageContent::DataRow(bytes))
                 }
                 b'C' => messages.push(DBMessageContent::CommandComplete),
-                b'Z' => messages.push(DBMessageContent::ReadyForQuery),
+                b'Z' => {
+                    let status_byte = self.read_u8()?;
+                    if let Ok(status) = String::from_utf8([status_byte].to_vec()) {
+                        messages.push(DBMessageContent::ReadyForQuery(status));
+                        self.cursor -= 1;
+                    }
+                }
                 b'R' => messages.push(DBMessageContent::AuthenticationOk),
                 b'1' => messages.push(DBMessageContent::ParseComplete),
                 b'2' => messages.push(DBMessageContent::BindComplete),
@@ -186,14 +196,12 @@ impl<'a> ByteReader<'a> {
             }
             // 0u8 is the normal cstring null terminator (basically just a byte with the value 0)
             else if self.buffer[self.cursor] == 0u8 {
-                // println!("cursor is at: {} and hit a null terminator", self.cursor);
                 self.cursor += 1;
                 break;
             }
             self.cursor += 1;
         }
 
-        // println!("Cursor is at:{} and is trying to parse now", self.cursor);
         match String::from_utf8(self.buffer[start_cursor..self.cursor - 1].to_vec()) {
             Ok(string) => Ok(string),
             Err(err) => Err(ByteReaderError {
