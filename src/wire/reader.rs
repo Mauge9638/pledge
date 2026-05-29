@@ -136,7 +136,7 @@ impl<'a> ByteReader<'a> {
                     })
                 }
                 b'S' => messages.push(ClientMessageContent::SyncMessage), // Sync
-                b'C' => println!("identification byte: 'Close'"),         // Close
+                b'C' => messages.push(ClientMessageContent::CloseMessage), // Close
                 b'X' => messages.push(ClientMessageContent::TerminateMessage), // Terminate
                 _ => messages.push(ClientMessageContent::UnknownMessage),
             }
@@ -158,29 +158,57 @@ impl<'a> ByteReader<'a> {
             self.cursor += 1;
             let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {
+                b'1' => {
+                    messages.push(DBMessageContent::ParseComplete {
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
+                }
+                b'2' => {
+                    messages.push(DBMessageContent::BindComplete {
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
+                }
                 b't' => {
                     let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
-                    messages.push(DBMessageContent::ParameterDescription(bytes))
+                    messages.push(DBMessageContent::ParameterDescription {
+                        data: bytes,
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
                 }
                 b'T' => {
                     let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
-                    messages.push(DBMessageContent::RowDescription(bytes))
+                    messages.push(DBMessageContent::RowDescription {
+                        data: bytes,
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
                 }
                 b'D' => {
                     let bytes = self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec();
-                    messages.push(DBMessageContent::DataRow(bytes))
+                    messages.push(DBMessageContent::DataRow {
+                        data: bytes,
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
                 }
-                b'C' => messages.push(DBMessageContent::CommandComplete),
+                b'C' => messages.push(DBMessageContent::CommandComplete {
+                    start: self.cursor - 5,
+                    end: self.cursor + slice_length,
+                }),
                 b'Z' => {
-                    let status_byte = self.read_u8()?;
-                    if let Ok(status) = String::from_utf8([status_byte].to_vec()) {
-                        messages.push(DBMessageContent::ReadyForQuery(status));
-                        self.cursor -= 1;
-                    }
+                    messages.push(DBMessageContent::ReadyForQuery {
+                        data: self.buffer[self.cursor - 5..(self.cursor + slice_length)].to_vec(),
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
                 }
-                b'R' => messages.push(DBMessageContent::AuthenticationOk),
-                b'1' => messages.push(DBMessageContent::ParseComplete),
-                b'2' => messages.push(DBMessageContent::BindComplete),
+                b'R' => messages.push(DBMessageContent::AuthenticationOk {
+                    start: self.cursor - 5,
+                    end: self.cursor + slice_length,
+                }),
                 _ => messages.push(DBMessageContent::UnknownMessage),
             }
             self.cursor += slice_length;

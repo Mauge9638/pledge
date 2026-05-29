@@ -227,6 +227,14 @@ impl Encode for BindComplete {
 // Client
 #[derive(Clone)]
 pub(super) enum ClientMessageContent {
+    ParseComplete {
+        start: usize,
+        end: usize,
+    },
+    BindComplete {
+        start: usize,
+        end: usize,
+    },
     QueryMessage {
         data: QueryMessageContent,
         start: usize,
@@ -253,20 +261,48 @@ pub(super) enum ClientMessageContent {
         end: usize,
     },
     SyncMessage,
-    //CloseMessage(CloseMessageContent, usize),
+    CloseMessage,
     TerminateMessage,
     UnknownMessage,
 }
 
 pub(super) enum DBMessageContent {
-    ParseComplete,
-    BindComplete,
-    ParameterDescription(Vec<u8>),
-    RowDescription(Vec<u8>),
-    DataRow(Vec<u8>),
-    CommandComplete,
-    ReadyForQuery(String),
-    AuthenticationOk,
+    ParseComplete {
+        start: usize,
+        end: usize,
+    },
+    BindComplete {
+        start: usize,
+        end: usize,
+    },
+    ParameterDescription {
+        data: Vec<u8>,
+        start: usize,
+        end: usize,
+    },
+    RowDescription {
+        data: Vec<u8>,
+        start: usize,
+        end: usize,
+    },
+    DataRow {
+        data: Vec<u8>,
+        start: usize,
+        end: usize,
+    },
+    CommandComplete {
+        start: usize,
+        end: usize,
+    },
+    ReadyForQuery {
+        data: Vec<u8>,
+        start: usize,
+        end: usize,
+    },
+    AuthenticationOk {
+        start: usize,
+        end: usize,
+    },
     UnknownMessage,
 }
 
