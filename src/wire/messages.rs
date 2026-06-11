@@ -317,7 +317,7 @@ impl Decode for Query {
     type Output = QueryMessageContent;
     fn decode(&self) -> Result<QueryMessageContent, ByteReaderError> {
         Ok(QueryMessageContent {
-            query: ByteReader::new(&self.bytes, 0).read_cstring()?,
+            query: ByteReader::new(self.bytes.to_vec(), 0).read_cstring()?,
         })
     }
 }
@@ -333,7 +333,7 @@ pub(super) struct Parse {
 impl Decode for Parse {
     type Output = ParseMessageContent;
     fn decode(&self) -> Result<ParseMessageContent, ByteReaderError> {
-        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut reader = ByteReader::new(self.bytes.to_vec(), 0);
         let prepared_statement_name = reader.read_cstring()?;
         let query = reader.read_cstring()?;
         let parameter_data_types_len: usize = reader.read_i16_as_usize()?;
@@ -364,7 +364,7 @@ pub(super) struct Bind {
 impl Decode for Bind {
     type Output = BindMessageContent;
     fn decode(&self) -> Result<BindMessageContent, ByteReaderError> {
-        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut reader = ByteReader::new(self.bytes.to_vec(), 0);
         let portal_name = reader.read_cstring()?;
         let source_prepared_statement_name = reader.read_cstring()?;
         let parameter_format_codes_len = reader.read_i16_as_usize()?;
@@ -449,7 +449,7 @@ pub(super) struct Describe {
 impl Decode for Describe {
     type Output = DescribeMessageContent;
     fn decode(&self) -> Result<DescribeMessageContent, ByteReaderError> {
-        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut reader = ByteReader::new(self.bytes.to_vec(), 0);
         let target: DescribeMessageContentTarget = reader.read_u8()?.try_into()?;
         let name = reader.read_cstring()?;
 
@@ -471,7 +471,7 @@ pub(super) struct Execute {
 impl Decode for Execute {
     type Output = ExecuteMessageContent;
     fn decode(&self) -> Result<ExecuteMessageContent, ByteReaderError> {
-        let mut reader = ByteReader::new(&self.bytes, 0);
+        let mut reader = ByteReader::new(self.bytes.to_vec(), 0);
         let name = reader.read_cstring()?;
         let rows_to_return_limit = reader.read_i32()?;
 

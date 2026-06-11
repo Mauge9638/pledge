@@ -1,5 +1,3 @@
-use std::str::from_utf8;
-
 use super::{
     Decode, WireProtocolStates,
     messages::{Bind, ClientMessageContent, DBMessageContent, Describe, Execute, Parse, Query},
@@ -18,16 +16,20 @@ pub(super) struct ByteReaderError {
     pub message: String,
 }
 
-pub(super) struct ByteReader<'a> {
-    buffer: &'a [u8],
+pub(super) struct ByteReader {
+    buffer: Vec<u8>,
     cursor: usize,
 }
 
-impl<'a> ByteReader<'a> {
-    pub(super) fn new(buffer: &'a [u8], cursor: usize) -> Self {
+impl ByteReader {
+    pub(super) fn new(buffer: Vec<u8>, cursor: usize) -> Self {
         Self { buffer, cursor }
     }
-    pub(super) fn update_cursor(&mut self, new_cursor: usize) {
+    pub(super) fn set_buffer(&mut self, buffer: Vec<u8>) {
+        self.buffer = buffer;
+    }
+
+    pub(super) fn set_cursor(&mut self, new_cursor: usize) {
         self.cursor = new_cursor;
     }
     pub(super) fn get_cursor_size(&self) -> usize {
@@ -76,7 +78,7 @@ impl<'a> ByteReader<'a> {
             if self.cursor >= self.buffer.len() {
                 break;
             }
-            let type_byte = &self.buffer[self.cursor];
+            let type_byte = self.buffer[self.cursor];
             self.cursor += 1;
             let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {
@@ -154,7 +156,7 @@ impl<'a> ByteReader<'a> {
             if self.cursor >= self.buffer.len() {
                 break;
             }
-            let type_byte = &self.buffer[self.cursor];
+            let type_byte = self.buffer[self.cursor];
             self.cursor += 1;
             let slice_length = self.read_i32_as_usize()? - 4;
             match type_byte {

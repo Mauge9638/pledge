@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::error;
 use std::io::{self, Error};
 use std::ops::Range;
 use std::sync::Arc;
@@ -34,6 +35,7 @@ use types::{
     ReplayTrim, StateHandlingResult,
 };
 
+use message_framer::MessageFramer;
 use messages::{
     BindComplete, BindMessageContent,
     ClientMessageContent::{
@@ -44,6 +46,7 @@ use messages::{
     ExecuteMessageContent, ParseComplete, ParseMessageContent, QueryMessageContent,
 };
 
+mod message_framer;
 mod messages;
 mod reader;
 mod state_handling;
@@ -94,11 +97,81 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
         buffer: vec![0u8; 8 * 1024],
         prepared_statements: HashMap::new(),
         portals: HashMap::new(),
+        framer: MessageFramer::new(),
     };
     let mut db_state = DBState {
         app_state: app_state.clone(),
         buffer: vec![0u8; 32 * 1024],
+        framer: MessageFramer::new(),
     };
+    let mut state = WireProtocolStates::WaitingForSSL;
+    let mut startup_framer = MessageFramer::new();
+
+    'start_up_loop: loop {
+        match state {
+            WireProtocolStates::WaitingForSSL => {
+                let client_buffer_data_length =
+                    match client_read.read(&mut client_state.buffer[0..]).await {
+                        Ok(n) => n,
+                        Err(err) => {
+                            eprintln!("Error occurred: {}", err);
+                            return;
+                        }
+                    };
+                stream_try_write(&db_write, &client_state.buffer[..client_buffer_data_length])
+                    .await;
+
+                let db_buffer_data_length = match db_read.read(&mut db_state.buffer[0..]).await {
+                    Ok(n) => n,
+                    Err(err) => {
+                        eprintln!("Error occurred: {}", err);
+                        return;
+                    }
+                };
+                stream_try_write(&client_write, &db_state.buffer[..db_buffer_data_length]).await;
+                if db_state.buffer[0] == b'N' {
+                    state = WireProtocolStates::WaitingForStartup;
+                    println!("Transitioning to WaitingForStartup")
+                } else if db_state.buffer[0] == b'S' {
+                    eprintln!(
+                        "Pledge can't inspect the bytes if SSL is on, this feature will be enabled in the future however"
+                    );
+                    return;
+                }
+            }
+            WireProtocolStates::WaitingForStartup => {
+                let client_buffer_data_length =
+                    match client_read.read(&mut client_state.buffer[0..]).await {
+                        Ok(n) => n,
+                        Err(err) => {
+                            eprintln!("Error occurred: {}", err);
+                            return;
+                        }
+                    };
+                stream_try_write(&db_write, &client_state.buffer[..client_buffer_data_length])
+                    .await;
+
+                let db_buffer_data_length = match db_read.read(&mut db_state.buffer[0..]).await {
+                    Ok(n) => n,
+                    Err(err) => {
+                        eprintln!("Error occurred: {}", err);
+                        return;
+                    }
+                };
+                stream_try_write(&client_write, &db_state.buffer[..db_buffer_data_length]).await;
+
+                startup_framer.add_buffer(&db_state.buffer[..db_buffer_data_length]);
+                while let Ok(Some(msg)) = startup_framer.next_message() {
+                    if msg[0] == b'Z' {
+                        // This indicates the startup is complete as the 'Z' means ReadyForQuery
+                        state = WireProtocolStates::ReadyForQuery;
+                        println!("Transitioning to ReadyForQuery");
+                    }
+                }
+            }
+            WireProtocolStates::ReadyForQuery => break 'start_up_loop,
+        }
+    }
 
     let client_spawn = tokio::spawn(async move {
         println!("Accepted connection from {:?} ", client_read.peer_addr(),);
@@ -160,7 +233,7 @@ async fn handle_client(
     buffer_data_length: usize,
     tx: &Sender<(BTreeMap<u16, CacheCommand>, bool)>,
 ) {
-    let mut reader = ByteReader::new(&client_state.buffer[..buffer_data_length], 0);
+    let mut reader = ByteReader::new(client_state.buffer[..buffer_data_length].to_vec(), 0);
     if let Ok(messages) = reader.crawl_and_find_messages_client() {
         let (cache_commands, replay_trims, should_hit_db) =
             find_cache_related_messages(messages, client_state).await;
@@ -203,7 +276,20 @@ async fn handle_db_read(
                     break 'inner_loop;
                 }
             }
-            let mut reader = ByteReader::new(&db_state.buffer[..*buffer_data_length], 0);
+
+            db_state
+                .framer
+                .add_buffer(&db_state.buffer[..*buffer_data_length]);
+            'framer_loop: loop {
+                match db_state.framer.next_message() {
+                    Ok(option) => match option {
+                        Some(bytes) => {}
+                        None => break 'framer_loop,
+                    },
+                    Err(err) => return Err(err),
+                }
+            }
+            //let mut reader = ByteReader::new(db_state.buffer[..*buffer_data_length].to_vec(), 0);
             // match reader.crawl_and_find_messages_db() {
             //     Ok(messages) => {
             //         for message in messages {

@@ -60,14 +60,14 @@ pub async fn query_handler(
     // Cache miss path
     CACHE_MISSES.inc();
     println!("x CACHE MISS (key: {})", &key[0..8]);
-    let rows = execute_query(&state.pool, &body.sql, &body.params).await?;
+    //let rows = execute_query(&state.pool, &body.sql, &body.params).await?;
 
-    let response = QueryResponse { rows };
-    let cache_bytes = postcard::to_allocvec(&response)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let json_value = response_to_json(&response);
-    let json_bytes = serde_json::to_vec(&json_value)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    //let response = QueryResponse { rows };
+    //let cache_bytes = postcard::to_allocvec(&response)
+    //    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // let json_value = response_to_json(&response);
+    // let json_bytes = serde_json::to_vec(&json_value)
+    //     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // if let Some(template) = matched_template {
     //     let expiration = match template.ttl {
@@ -79,10 +79,11 @@ pub async fn query_handler(
     // }
 
     TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(json_bytes.into())
-        .unwrap())
+    // Ok(Response::builder()
+    //     .header(header::CONTENT_TYPE, "application/json")
+    //     .body(json_bytes.into())
+    //     .unwrap())
+    Err((StatusCode::INTERNAL_SERVER_ERROR, "asd".to_string()))
 }
 
 async fn execute_query(

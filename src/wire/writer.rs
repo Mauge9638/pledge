@@ -55,7 +55,7 @@ impl<'a> ByteWriter<'a> {
     }
     pub(super) fn merge_cache_commands(&mut self, commands: &BTreeMap<u16, CacheCommand>) {
         let reader_buffer = self.buffer.clone();
-        let mut reader = ByteReader::new(&reader_buffer, 0);
+        let mut reader = ByteReader::new(reader_buffer, 0);
         match reader.crawl_and_find_messages_db() {
             Ok(messages) => {
                 for (order, command) in commands {

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use super::DescribeMessageContent;
+use super::MessageFramer;
 use crate::{AppState, cache::lfu::CachedResponse};
 use tokio::net::{
     TcpStream,
@@ -41,11 +42,13 @@ pub(super) struct ClientState {
     pub buffer: Vec<u8>,
     pub prepared_statements: HashMap<String, PreparedStatement>,
     pub portals: HashMap<String, Portal>,
+    pub framer: MessageFramer,
 }
 
 pub(super) struct DBState {
     pub app_state: AppState,
     pub buffer: Vec<u8>,
+    pub framer: MessageFramer,
 }
 
 pub(super) struct Streams {
