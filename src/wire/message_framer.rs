@@ -1,5 +1,3 @@
-use crate::wire::ByteReader;
-
 pub(super) struct MessageFramer {
     buffer: Vec<u8>,
     cursor: usize,

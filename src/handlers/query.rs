@@ -1,11 +1,11 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::database::value::PostcardValue;
 use crate::metrics::{CACHE_HITS, CACHE_MISSES, TOTAL_QUERY_DURATION, register_cache_hit};
 use crate::server::state::AppState;
 use crate::{cache::store::cache_key, database::conversion};
 use axum::Json;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, PgPool, Row};

@@ -1,17 +1,10 @@
-use std::{
-    collections::HashMap,
-    fmt::{Display, Formatter},
-    string::FromUtf8Error,
-};
+use std::fmt::{Display, Formatter};
 
 use super::{reader::ByteReaderErrorKind, types::ColumnMetadata};
 
 use super::reader::{ByteReader, ByteReaderError};
 use bytes::{BufMut, BytesMut};
-use sqlx::{
-    Column, Row,
-    postgres::{PgColumn, PgRow},
-};
+use sqlx::{Row, postgres::PgRow};
 
 use super::SQLCommand;
 

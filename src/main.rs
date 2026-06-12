@@ -1,4 +1,3 @@
-use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
 
 mod cache;
