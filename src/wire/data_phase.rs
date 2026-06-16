@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::cache::lfu::CachedResponse;
+
 use super::{
     reader::ByteReader,
     types::{CacheCommand, ClientState, DBState},
@@ -17,6 +19,13 @@ pub(super) async fn handle_client(
     buffer_data_length: usize,
     tx: &Sender<(BTreeMap<u16, CacheCommand>, bool)>,
 ) {
+    client_state
+        .framer
+        .add_buffer(&client_state.buffer[..buffer_data_length]);
+    while let Ok(Some(msg)) = client_state.framer.next_message() {
+        // println!("message: {:?}", msg);
+    }
+
     let mut reader = ByteReader::new(client_state.buffer[..buffer_data_length].to_vec(), 0);
     if let Ok(messages) = reader.crawl_and_find_messages_client() {
         let (cache_commands, replay_trims, should_hit_db) =
@@ -71,7 +80,7 @@ pub(super) async fn handle_db_read(
                 match db_state.framer.next_message() {
                     Ok(option) => match option {
                         Some(bytes) => {
-                            println!("framed type byte:{}", bytes[0])
+                            // println!("framed type byte:{}", bytes[0])
                         }
                         None => break,
                     },
@@ -101,16 +110,18 @@ pub(super) async fn handle_db_cache_command(
     println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
 
     if cache_commands.len() > 0 {
+        let capture_target: Option<(String, String)> = None;
         let mut has_cache_miss: bool = false;
-        'cache_commands_check: for (_, command) in &cache_commands {
+        for (_, command) in &cache_commands {
             match command {
                 CacheCommand::Replay { data, .. } => {
                     println!("replay: {:?}", data);
                 }
-                CacheCommand::Capture { key, .. } => {
+                CacheCommand::Capture { key, query, .. } => {
                     println!("capture: {:?}", key);
+                    capture_target = Some((key.clone(), query.clone()));
                     has_cache_miss = true;
-                    break 'cache_commands_check;
+                    break;
                 }
             }
         }
@@ -139,9 +150,59 @@ pub(super) async fn handle_db_cache_command(
                 }
             }
         }
-        let mut writer = ByteWriter::new(&mut db_state.buffer, 0);
-        //writer.merge_cache_commands(&cache_commands);
+        // let mut writer = ByteWriter::new(&mut db_state.buffer, 0);
+        // writer.merge_cache_commands(&cache_commands);
         super::stream_try_write(client_write, &db_state.buffer[..*buffer_data_length]).await;
+        db_state
+            .framer
+            .add_buffer(&db_state.buffer[..*buffer_data_length]);
+        let mut capture_end = false;
+        let mut cached_response = CachedResponse {
+            data: Vec::new(),
+            param_desc: None,
+            row_desc: None,
+        };
+        loop {
+            match db_state.framer.next_message() {
+                Ok(option) => match option {
+                    Some(mut bytes) => {
+                        match bytes[0] {
+                            b'Z' => {
+                                println!("This is a ReadyForQuery message")
+                            }
+                            b't' => {
+                                cached_response.data.extend_from_slice(&bytes);
+                                cached_response.param_desc = Some(bytes)
+                            }
+                            b'T' => {
+                                cached_response.data.extend_from_slice(&bytes);
+                                cached_response.row_desc = Some(bytes)
+                            }
+                            b'C' => {
+                                cached_response.data.extend_from_slice(&bytes);
+                                capture_end = true;
+                                println!("This is a CommandComplete message");
+                                break;
+                            }
+
+                            _ => {
+                                cached_response.data.append(&mut bytes);
+                            }
+                        }
+                        println!("framed type byte:{}", bytes[0])
+                    }
+                    None => break,
+                },
+                Err(err) => {
+                    eprintln!("Something went wrong while framing: {}", err);
+                    return Err(format!("Something went wrong while framing: {}", err));
+                }
+            }
+        }
+        if capture_end && capture_target.is_some() {
+            let (key, query) = capture_target.unwrap();
+            super::cache_planner::set_in_cache(&db_state.app_state, &query, &key, cached_response);
+        }
     }
     // This should never happen, BUT as a precaution we handle it by sending the DB response to the client
     else {

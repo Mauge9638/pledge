@@ -90,14 +90,17 @@ pub(super) enum ProtocolMode {
 #[derive(Clone)]
 pub(super) enum CacheCommand {
     Replay {
+        key: String,
         data: Arc<CachedResponse>,
         describe_kind: DescribeKind,
         protocol_mode: ProtocolMode,
+        query: String,
     }, // cache hit: write these to client, skip DB
     Capture {
         key: String,
         describe_kind: DescribeKind,
         protocol_mode: ProtocolMode,
+        query: String,
     }, // cache miss: next DB response belongs to this key
 }
 

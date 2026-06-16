@@ -53,27 +53,27 @@ impl<'a> ByteWriter<'a> {
             .drain((section.start - offset)..(section.end - offset));
         return offset + section.end - section.start;
     }
-    pub(super) fn merge_cache_commands(&mut self, commands: &BTreeMap<u16, CacheCommand>) {
-        let reader_buffer = self.buffer.clone();
-        let mut reader = ByteReader::new(reader_buffer, 0);
-        match reader.crawl_and_find_messages_db() {
-            Ok(messages) => {
-                for (order, command) in commands {
-                    match command {
-                        CacheCommand::Replay {
-                            data,
-                            describe_kind,
-                            protocol_mode,
-                        } => {}
-                        CacheCommand::Capture {
-                            key,
-                            describe_kind,
-                            protocol_mode,
-                        } => {}
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
+    // pub(super) fn merge_cache_commands(&mut self, commands: &BTreeMap<u16, CacheCommand>) {
+    //     let reader_buffer = self.buffer.clone();
+    //     let mut reader = ByteReader::new(reader_buffer, 0);
+    //     match reader.crawl_and_find_messages_db() {
+    //         Ok(messages) => {
+    //             for (order, command) in commands {
+    //                 match command {
+    //                     CacheCommand::Replay {
+    //                         data,
+    //                         describe_kind,
+    //                         protocol_mode,
+    //                     } => {}
+    //                     CacheCommand::Capture {
+    //                         key,
+    //                         describe_kind,
+    //                         protocol_mode,
+    //                     } => {}
+    //                 }
+    //             }
+    //         }
+    //         Err(_) => {}
+    //     }
+    // }
 }

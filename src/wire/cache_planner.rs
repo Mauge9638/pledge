@@ -96,19 +96,23 @@ pub(super) async fn find_cache_related_messages(
                     Some(cache_key) => cache_key,
                     None => {
                         should_hit_db = true;
+                        order += 1;
                         break 'query;
                     }
                 };
                 let cache_command = match get_from_cache(client_state, &cache_key) {
-                    Some(data) => CacheCommand::Replay {
-                        data,
+                    Some(cached_response) => CacheCommand::Replay {
+                        data: cached_response,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
+                        query: data.query,
+                        key: cache_key,
                     },
                     None => CacheCommand::Capture {
                         key: cache_key,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
+                        query: data.query,
                     },
                 };
                 cache_commands.insert(order, cache_command);
@@ -133,6 +137,7 @@ pub(super) async fn find_cache_related_messages(
                         Some(cache_key) => cache_key,
                         None => {
                             should_hit_db = true;
+                            order += 1;
                             break 'execute;
                         }
                     };
@@ -180,17 +185,22 @@ pub(super) async fn find_cache_related_messages(
                     };
 
                     let cache_command = match &cache_response {
-                        Some(data) if cache_data_can_satisfy(data, &describe_kind) => {
+                        Some(cached_response)
+                            if cache_data_can_satisfy(cached_response, &describe_kind) =>
+                        {
                             CacheCommand::Replay {
-                                data: data.clone(),
+                                data: cached_response.clone(),
                                 describe_kind,
                                 protocol_mode: ProtocolMode::Extended,
+                                query: data.query.clone(),
+                                key: cache_key.clone(),
                             }
                         }
                         _ => CacheCommand::Capture {
                             key: cache_key,
                             describe_kind,
                             protocol_mode: ProtocolMode::Extended,
+                            query: data.query.clone(),
                         },
                     };
 
