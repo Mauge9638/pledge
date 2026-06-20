@@ -7,7 +7,8 @@ use std::{
 
 use crate::{
     AppState,
-    cache::{lfu::CachedResponse, store::cache_key_wire},
+    cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
+    wire::types::CachePlan,
 };
 
 use super::{
@@ -30,21 +31,19 @@ pub(super) fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Ar
     return client_state.app_state.cache.get(&key);
 }
 
-pub(super) fn set_in_cache(app_state: &AppState, query: &str, key: &str, data: CachedResponse) {
+pub(super) fn set_in_cache(app_state: &AppState, ttl: u64, key: &str, data: CachedResponse) {
     println!("cache_key set: {}", key);
-    if let Some(template) = app_state.matcher.find_template(query) {
-        let expiration = match template.ttl {
-            Some(ttl) => Instant::now() + Duration::from_secs(ttl),
-            None => Instant::now() + Duration::from_secs(app_state.global_ttl),
-        };
-        app_state.cache.insert(key.to_string(), data, expiration);
-    }
+    app_state.cache.insert(
+        key.to_string(),
+        data,
+        Instant::now() + Duration::from_secs(ttl),
+    );
 }
 
-pub(super) fn is_cache_configured(
+pub(super) fn find_template(
     content: &ExecuteMessageContent,
     client_state: &mut ClientState,
-) -> Option<String> {
+) -> Option<CachePlan> {
     let portal = match client_state.portals.get(&content.name) {
         Some(portal) => portal,
         None => return None,
@@ -56,26 +55,38 @@ pub(super) fn is_cache_configured(
         Some(prepared_statement) => prepared_statement,
         None => return None,
     };
-    if client_state
-        .app_state
-        .matcher
-        .template_exists(&prepared_statement.query)
-    {
-        return Some(cache_key_wire(
-            &prepared_statement.query,
-            &portal.parameter_values,
-        ));
+
+    if let Some(ttl) = resolve_ttl(&client_state.app_state, &prepared_statement.query) {
+        return Some(CachePlan {
+            key: cache_key_wire(&prepared_statement.query, &portal.parameter_values),
+            ttl: ttl,
+        });
     }
     None
 }
-pub(super) fn is_cache_configured_simple(
+
+pub(super) fn find_template_simple(
     query: &String,
     client_state: &mut ClientState,
-) -> Option<String> {
-    if client_state.app_state.matcher.template_exists(&query) {
-        return Some(cache_key_wire(&query, &Vec::new()));
+) -> Option<CachePlan> {
+    if let Some(ttl) = resolve_ttl(&client_state.app_state, &query) {
+        return Some(CachePlan {
+            key: cache_key_wire(query, &Vec::new()),
+            ttl: ttl,
+        });
     }
     None
+}
+
+pub(super) fn resolve_ttl(app_state: &AppState, query: &str) -> Option<Duration> {
+    let ttl = match app_state.matcher.find_template(&query) {
+        Some(template) => match template.ttl {
+            Some(ttl) => Duration::from_secs(ttl),
+            None => Duration::from_secs(app_state.global_ttl),
+        },
+        None => return None,
+    };
+    return Some(ttl);
 }
 
 pub(super) async fn find_cache_related_messages(
@@ -92,27 +103,28 @@ pub(super) async fn find_cache_related_messages(
     for message in messages {
         match message {
             QueryMessage { data, start, end } => 'query: {
-                let cache_key = match is_cache_configured_simple(&data.query, client_state) {
-                    Some(cache_key) => cache_key,
+                let cache_plan = match find_template_simple(&data.query, client_state) {
+                    Some(cache_plan) => cache_plan,
                     None => {
                         should_hit_db = true;
                         order += 1;
                         break 'query;
                     }
                 };
-                let cache_command = match get_from_cache(client_state, &cache_key) {
+                let cache_command = match get_from_cache(client_state, &cache_plan.key) {
                     Some(cached_response) => CacheCommand::Replay {
                         data: cached_response,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
                         query: data.query,
-                        key: cache_key,
+                        key: cache_plan.key,
                     },
                     None => CacheCommand::Capture {
-                        key: cache_key,
+                        key: cache_plan.key,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
                         query: data.query,
+                        ttl: cache_plan.ttl,
                     },
                 };
                 cache_commands.insert(order, cache_command);
@@ -133,17 +145,18 @@ pub(super) async fn find_cache_related_messages(
             }
             ExecuteMessage { data, start, end } => 'execute: {
                 if data.rows_to_return_limit == 0 {
-                    let cache_key = match is_cache_configured(&data, client_state) {
-                        Some(cache_key) => cache_key,
+                    let cache_plan = match find_template(&data, client_state) {
+                        Some(cache_plan) => cache_plan,
                         None => {
                             should_hit_db = true;
                             order += 1;
                             break 'execute;
                         }
                     };
-                    let cache_response = get_from_cache(client_state, &cache_key);
+                    let cache_response = get_from_cache(client_state, &cache_plan.key);
                     let describe_kind: DescribeKind;
                     let mut paired_parse_message = None;
+                    let mut paired_parse_message_query = String::new();
                     let mut paired_bind_message = None;
                     let mut paired_describe_message = None;
 
@@ -184,26 +197,6 @@ pub(super) async fn find_cache_related_messages(
                         None => DescribeKind::None,
                     };
 
-                    let cache_command = match &cache_response {
-                        Some(cached_response)
-                            if cache_data_can_satisfy(cached_response, &describe_kind) =>
-                        {
-                            CacheCommand::Replay {
-                                data: cached_response.clone(),
-                                describe_kind,
-                                protocol_mode: ProtocolMode::Extended,
-                                query: data.query.clone(),
-                                key: cache_key.clone(),
-                            }
-                        }
-                        _ => CacheCommand::Capture {
-                            key: cache_key,
-                            describe_kind,
-                            protocol_mode: ProtocolMode::Extended,
-                            query: data.query.clone(),
-                        },
-                    };
-
                     if cache_response.is_some() {
                         let portal_name = &data.name;
                         'find_bind: for (index, current_bind_message) in
@@ -219,6 +212,8 @@ pub(super) async fn find_cache_related_messages(
                                         == current_bind_message.0.source_prepared_statement_name
                                     {
                                         paired_parse_message = Some(current_parse_message.clone());
+                                        paired_parse_message_query =
+                                            current_parse_message.0.query.clone();
                                         parse_messages.remove(index);
                                         break 'find_parse;
                                     }
@@ -228,6 +223,27 @@ pub(super) async fn find_cache_related_messages(
                             }
                         }
                     }
+
+                    let cache_command = match &cache_response {
+                        Some(cached_response)
+                            if cache_data_can_satisfy(cached_response, &describe_kind) =>
+                        {
+                            CacheCommand::Replay {
+                                data: cached_response.clone(),
+                                describe_kind,
+                                protocol_mode: ProtocolMode::Extended,
+                                query: paired_parse_message_query.clone(),
+                                key: cache_plan.key.clone(),
+                            }
+                        }
+                        _ => CacheCommand::Capture {
+                            key: cache_plan.key,
+                            describe_kind,
+                            protocol_mode: ProtocolMode::Extended,
+                            query: paired_parse_message_query.clone(),
+                            ttl: cache_plan.ttl,
+                        },
+                    };
 
                     cache_commands.insert(order, cache_command.clone());
                     order += 1;

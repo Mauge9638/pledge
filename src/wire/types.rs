@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
 use super::MessageFramer;
 use crate::{AppState, cache::lfu::CachedResponse};
@@ -101,6 +101,7 @@ pub(super) enum CacheCommand {
         describe_kind: DescribeKind,
         protocol_mode: ProtocolMode,
         query: String,
+        ttl: Duration,
     }, // cache miss: next DB response belongs to this key
 }
 
@@ -136,4 +137,9 @@ impl ReplayTrimExtended {
 
 pub(super) struct ReplayTrimSimple {
     pub query: Range<usize>,
+}
+
+pub(super) struct CachePlan {
+    pub key: String,
+    pub ttl: Duration,
 }

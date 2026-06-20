@@ -1,6 +1,4 @@
-use std::{collections::BTreeMap, ops::Range};
-
-use crate::wire::{ByteReader, CacheCommand};
+use std::ops::Range;
 
 use super::ReplayTrim;
 

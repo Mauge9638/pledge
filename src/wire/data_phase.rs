@@ -110,14 +110,16 @@ pub(super) async fn handle_db_cache_command(
     println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
 
     if cache_commands.len() > 0 {
-        let capture_target: Option<(String, String)> = None;
+        let mut capture_target: Option<(String, String)> = None;
         let mut has_cache_miss: bool = false;
         for (_, command) in &cache_commands {
             match command {
-                CacheCommand::Replay { data, .. } => {
+                CacheCommand::Replay { data, query, .. } => {
                     println!("replay: {:?}", data);
                 }
-                CacheCommand::Capture { key, query, .. } => {
+                CacheCommand::Capture {
+                    key, query, ttl, ..
+                } => {
                     println!("capture: {:?}", key);
                     capture_target = Some((key.clone(), query.clone()));
                     has_cache_miss = true;
@@ -150,8 +152,6 @@ pub(super) async fn handle_db_cache_command(
                 }
             }
         }
-        // let mut writer = ByteWriter::new(&mut db_state.buffer, 0);
-        // writer.merge_cache_commands(&cache_commands);
         super::stream_try_write(client_write, &db_state.buffer[..*buffer_data_length]).await;
         db_state
             .framer
@@ -212,4 +212,15 @@ pub(super) async fn handle_db_cache_command(
         handle_db_read(&result, db_state, client_write, buffer_data_length).await?;
     }
     Ok(())
+}
+
+pub(super) async fn handle_db_capture_command(
+    cache_commands: BTreeMap<u16, CacheCommand>,
+    should_hit_db: bool,
+    db_state: &mut DBState,
+    client_write: &OwnedWriteHalf,
+    db_read: &mut OwnedReadHalf,
+    buffer_data_length: &mut usize,
+)-> Result<(), String> {
+    
 }
