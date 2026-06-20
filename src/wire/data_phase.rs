@@ -215,12 +215,41 @@ pub(super) async fn handle_db_cache_command(
 }
 
 pub(super) async fn handle_db_capture_command(
-    cache_commands: BTreeMap<u16, CacheCommand>,
+    cache_command: CacheCommand,
     should_hit_db: bool,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
     buffer_data_length: &mut usize,
-)-> Result<(), String> {
-    
+) -> Result<(), String> {
+    match db_read
+        .read(&mut db_state.buffer[*buffer_data_length..])
+        .await
+    {
+        Ok(n) => {
+            *buffer_data_length += n;
+            'inner_loop: loop {
+                if *buffer_data_length == 0 {
+                    break 'inner_loop;
+                }
+                if *buffer_data_length >= db_state.buffer.len() {
+                    println!("Resizing db buffer");
+                    db_state.buffer.resize(db_state.buffer.len() * 2, 0);
+                } else {
+                    break 'inner_loop;
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("Error occurred: {}", err);
+            return Err(err.to_string());
+        }
+    };
+    super::stream_try_write(client_write, &db_state.buffer[..*buffer_data_length]).await;
+
+    db_state
+        .framer
+        .add_buffer(&db_state.buffer[..*buffer_data_length]);
+
+    Ok(())
 }
