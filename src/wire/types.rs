@@ -89,20 +89,26 @@ pub(super) enum ProtocolMode {
 
 #[derive(Clone)]
 pub(super) enum CacheCommand {
-    Replay {
-        key: String,
-        data: Arc<CachedResponse>,
-        describe_kind: DescribeKind,
-        protocol_mode: ProtocolMode,
-        query: String,
-    }, // cache hit: write these to client, skip DB
-    Capture {
-        key: String,
-        describe_kind: DescribeKind,
-        protocol_mode: ProtocolMode,
-        query: String,
-        ttl: Duration,
-    }, // cache miss: next DB response belongs to this key
+    Replay(CacheCommandReplay),   // cache hit: write these to client, skip DB
+    Capture(CacheCommandCapture), // cache miss: next DB response belongs to this key
+}
+
+#[derive(Clone)]
+pub(super) struct CacheCommandReplay {
+    pub key: String,
+    pub data: Arc<CachedResponse>,
+    pub describe_kind: DescribeKind,
+    pub protocol_mode: ProtocolMode,
+    pub query: String,
+}
+
+#[derive(Clone)]
+pub(super) struct CacheCommandCapture {
+    pub key: String,
+    pub describe_kind: DescribeKind,
+    pub protocol_mode: ProtocolMode,
+    pub query: String,
+    pub ttl: Duration,
 }
 
 #[derive(Clone)]

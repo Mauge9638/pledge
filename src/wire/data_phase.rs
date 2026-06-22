@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::cache::lfu::CachedResponse;
+use crate::{cache::lfu::CachedResponse, wire::types::CacheCommandCapture};
 
 use super::{
     reader::ByteReader,
@@ -117,11 +117,9 @@ pub(super) async fn handle_db_cache_command(
                 CacheCommand::Replay { data, query, .. } => {
                     println!("replay: {:?}", data);
                 }
-                CacheCommand::Capture {
-                    key, query, ttl, ..
-                } => {
-                    println!("capture: {:?}", key);
-                    capture_target = Some((key.clone(), query.clone()));
+                CacheCommand::Capture(cmd) => {
+                    println!("capture: {:?}", cmd.key);
+                    capture_target = Some((cmd.key.clone(), cmd.query.clone()));
                     has_cache_miss = true;
                     break;
                 }
@@ -215,8 +213,7 @@ pub(super) async fn handle_db_cache_command(
 }
 
 pub(super) async fn handle_db_capture_command(
-    cache_command: CacheCommand,
-    should_hit_db: bool,
+    cache_command: CacheCommandCapture,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
@@ -251,5 +248,46 @@ pub(super) async fn handle_db_capture_command(
         .framer
         .add_buffer(&db_state.buffer[..*buffer_data_length]);
 
+    let mut cached_response = CachedResponse {
+        data: Vec::new(),
+        param_desc: None,
+        row_desc: None,
+    };
+    loop {
+        match db_state.framer.next_message() {
+            Ok(option) => match option {
+                Some(mut bytes) => {
+                    match bytes[0] {
+                        b'Z' => {
+                            println!("This is a ReadyForQuery message")
+                        }
+                        b't' => {
+                            cached_response.data.extend_from_slice(&bytes);
+                            cached_response.param_desc = Some(bytes)
+                        }
+                        b'T' => {
+                            cached_response.data.extend_from_slice(&bytes);
+                            cached_response.row_desc = Some(bytes)
+                        }
+                        b'C' => {
+                            cached_response.data.extend_from_slice(&bytes);
+                            println!("This is a CommandComplete message");
+                            break;
+                        }
+
+                        _ => {
+                            cached_response.data.append(&mut bytes);
+                        }
+                    }
+                    println!("framed type byte:{}", bytes[0])
+                }
+                None => break,
+            },
+            Err(err) => {
+                eprintln!("Something went wrong while framing: {}", err);
+                return Err(format!("Something went wrong while framing: {}", err));
+            }
+        }
+    }
     Ok(())
 }

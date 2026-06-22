@@ -8,7 +8,7 @@ use std::{
 use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
-    wire::types::CachePlan,
+    wire::types::{CacheCommandCapture, CachePlan},
 };
 
 use super::{
@@ -119,13 +119,13 @@ pub(super) async fn find_cache_related_messages(
                         query: data.query,
                         key: cache_plan.key,
                     },
-                    None => CacheCommand::Capture {
+                    None => CacheCommand::Capture(CacheCommandCapture {
                         key: cache_plan.key,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
                         query: data.query,
                         ttl: cache_plan.ttl,
-                    },
+                    }),
                 };
                 cache_commands.insert(order, cache_command);
                 replay_trims.push(ReplayTrim::Simple(ReplayTrimSimple { query: start..end }));
@@ -236,13 +236,13 @@ pub(super) async fn find_cache_related_messages(
                                 key: cache_plan.key.clone(),
                             }
                         }
-                        _ => CacheCommand::Capture {
+                        _ => CacheCommand::Capture(CacheCommandCapture {
                             key: cache_plan.key,
                             describe_kind,
                             protocol_mode: ProtocolMode::Extended,
                             query: paired_parse_message_query.clone(),
                             ttl: cache_plan.ttl,
-                        },
+                        }),
                     };
 
                     cache_commands.insert(order, cache_command.clone());
