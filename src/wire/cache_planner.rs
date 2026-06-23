@@ -8,7 +8,7 @@ use std::{
 use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
-    wire::types::{CacheCommandCapture, CachePlan},
+    wire::types::{CacheCommandCapture, CacheCommandReplay, CachePlan},
 };
 
 use super::{
@@ -31,13 +31,11 @@ pub(super) fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Ar
     return client_state.app_state.cache.get(&key);
 }
 
-pub(super) fn set_in_cache(app_state: &AppState, ttl: u64, key: &str, data: CachedResponse) {
+pub(super) fn set_in_cache(app_state: &AppState, ttl: Duration, key: &str, data: CachedResponse) {
     println!("cache_key set: {}", key);
-    app_state.cache.insert(
-        key.to_string(),
-        data,
-        Instant::now() + Duration::from_secs(ttl),
-    );
+    app_state
+        .cache
+        .insert(key.to_string(), data, Instant::now() + ttl);
 }
 
 pub(super) fn find_template(
@@ -112,13 +110,13 @@ pub(super) async fn find_cache_related_messages(
                     }
                 };
                 let cache_command = match get_from_cache(client_state, &cache_plan.key) {
-                    Some(cached_response) => CacheCommand::Replay {
+                    Some(cached_response) => CacheCommand::Replay(CacheCommandReplay {
                         data: cached_response,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
                         query: data.query,
                         key: cache_plan.key,
-                    },
+                    }),
                     None => CacheCommand::Capture(CacheCommandCapture {
                         key: cache_plan.key,
                         describe_kind: DescribeKind::None,
@@ -228,13 +226,13 @@ pub(super) async fn find_cache_related_messages(
                         Some(cached_response)
                             if cache_data_can_satisfy(cached_response, &describe_kind) =>
                         {
-                            CacheCommand::Replay {
+                            CacheCommand::Replay(CacheCommandReplay {
                                 data: cached_response.clone(),
                                 describe_kind,
                                 protocol_mode: ProtocolMode::Extended,
                                 query: paired_parse_message_query.clone(),
                                 key: cache_plan.key.clone(),
-                            }
+                            })
                         }
                         _ => CacheCommand::Capture(CacheCommandCapture {
                             key: cache_plan.key,
