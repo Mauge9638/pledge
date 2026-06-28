@@ -137,7 +137,12 @@ impl ByteReader {
                         end: self.cursor + slice_length,
                     })
                 }
-                b'S' => messages.push(ClientMessageContent::SyncMessage), // Sync
+                b'S' => {
+                    messages.push(ClientMessageContent::SyncMessage {
+                        start: self.cursor - 5,
+                        end: self.cursor + slice_length,
+                    });
+                }
                 b'C' => messages.push(ClientMessageContent::CloseMessage), // Close
                 b'X' => messages.push(ClientMessageContent::TerminateMessage), // Terminate
                 _ => messages.push(ClientMessageContent::UnknownMessage),

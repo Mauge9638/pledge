@@ -15,7 +15,7 @@ use super::{
     messages::{
         BindMessageContent, ClientMessageContent,
         ClientMessageContent::{
-            BindMessage, DescribeMessage, ExecuteMessage, ParseMessage, QueryMessage,
+            BindMessage, DescribeMessage, ExecuteMessage, ParseMessage, QueryMessage, SyncMessage,
             UnknownMessage,
         },
         DescribeMessageContent, DescribeMessageContentTarget, ExecuteMessageContent,
@@ -97,6 +97,7 @@ pub(super) async fn find_cache_related_messages(
     let mut parse_messages: Vec<(ParseMessageContent, usize, usize)> = Vec::new();
     let mut bind_messages: Vec<(BindMessageContent, usize, usize)> = Vec::new();
     let mut describe_messages: Vec<(DescribeMessageContent, usize, usize)> = Vec::new();
+    let mut sync_range: Range<usize> = 0..0;
     let mut order = 0;
     for message in messages {
         match message {
@@ -140,6 +141,16 @@ pub(super) async fn find_cache_related_messages(
             DescribeMessage { data, start, end } => {
                 let _ = describe_message(&data);
                 describe_messages.push((data, start, end));
+            }
+            SyncMessage { start, end } => {
+                println!("sync (start, end): ({}, {})", start, end);
+                if !replay_trims.is_empty() {
+                    let length = replay_trims.len();
+                    let last_replay = replay_trims.get_mut(length - 1);
+                    if let Some(ReplayTrim::Extended(data)) = last_replay {
+                        data.sync = Some(start..end);
+                    }
+                }
             }
             ExecuteMessage { data, start, end } => 'execute: {
                 if data.rows_to_return_limit == 0 {
@@ -269,6 +280,7 @@ pub(super) async fn find_cache_related_messages(
                                     None
                                 }
                             },
+                            sync: None,
                         }));
                     }
                 }

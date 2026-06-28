@@ -30,23 +30,38 @@ impl<'a> ByteWriter<'a> {
             match command {
                 ReplayTrim::Extended(command) => {
                     if let Some(parse) = command.parse {
+                        println!("parse:");
                         removed_indexes = self.drain_section(parse, removed_indexes);
                     }
                     if let Some(bind) = command.bind {
+                        println!("bind:");
                         removed_indexes = self.drain_section(bind, removed_indexes);
                     }
                     if let Some(describe) = command.describe {
+                        println!("describe:");
                         removed_indexes = self.drain_section(describe, removed_indexes);
                     }
+                    println!("execute:");
                     removed_indexes = self.drain_section(command.execute, removed_indexes);
+
+                    if let Some(sync) = command.sync {
+                        println!("sync:");
+                        removed_indexes = self.drain_section(sync, removed_indexes);
+                    }
                 }
                 ReplayTrim::Simple(command) => {
+                    println!("simple:");
                     removed_indexes = self.drain_section(command.query, removed_indexes);
                 }
             }
         }
     }
     fn drain_section(&mut self, section: Range<usize>, offset: usize) -> usize {
+        println!(
+            "current buffer len:{}, trying to drain: {:?}",
+            &self.buffer.len(),
+            &section
+        );
         self.buffer
             .drain((section.start - offset)..(section.end - offset));
         return offset + section.end - section.start;

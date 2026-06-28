@@ -253,7 +253,10 @@ pub(super) enum ClientMessageContent {
         start: usize,
         end: usize,
     },
-    SyncMessage,
+    SyncMessage {
+        start: usize,
+        end: usize,
+    },
     CloseMessage,
     TerminateMessage,
     UnknownMessage,

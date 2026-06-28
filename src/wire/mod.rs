@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use tokio::{
     io::AsyncReadExt,
-    net::tcp::OwnedWriteHalf,
-    net::{TcpListener, TcpStream},
+    net::{
+        TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
     sync::mpsc,
 };
 
@@ -11,8 +13,8 @@ use types::{SQLCommand, WireProtocolStates};
 
 use messages::Decode;
 
-use crate::AppState;
 use crate::config::DatabaseConfig;
+use crate::{AppState, wire::types::BufferState};
 use reader::ByteReader;
 use types::{CacheCommand, ClientState, DBState, ReplayTrim};
 
@@ -68,14 +70,22 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
     let (tx, mut rx) = mpsc::channel(32 * 1024);
     let mut client_state = ClientState {
         app_state: app_state.clone(),
-        buffer: vec![0u8; 8 * 1024],
+        buffer_state: BufferState {
+            buffer: vec![0u8; 8 * 1024],
+            write_cursor: 0,
+            read_cursor: 0,
+        },
         prepared_statements: HashMap::new(),
         portals: HashMap::new(),
         framer: MessageFramer::new(),
     };
     let mut db_state = DBState {
         app_state: app_state.clone(),
-        buffer: vec![0u8; 32 * 1024],
+        buffer_state: BufferState {
+            buffer: vec![0u8; 128 * 1024],
+            write_cursor: 0,
+            read_cursor: 0,
+        },
         framer: MessageFramer::new(),
     };
 
@@ -91,12 +101,14 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
 
     let client_spawn = tokio::spawn(async move {
         println!("Accepted connection from {:?} ", client_read.peer_addr(),);
-        let mut buffer_data_length;
         'outer_loop: loop {
-            buffer_data_length = 0;
+            client_state.buffer_state.data_length = 0;
             'inner_loop: loop {
-                buffer_data_length += match client_read
-                    .read(&mut client_state.buffer[buffer_data_length..])
+                client_state.buffer_state.data_length += match client_read
+                    .read(
+                        &mut client_state.buffer_state.buffer
+                            [client_state.buffer_state.data_length..],
+                    )
                     .await
                 {
                     Ok(n) => n,
@@ -105,17 +117,20 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                         break 'outer_loop;
                     }
                 };
-                if buffer_data_length == 0 {
+                if client_state.buffer_state.data_length == 0 {
                     break 'inner_loop;
                 }
-                if buffer_data_length >= client_state.buffer.len() {
+                if client_state.buffer_state.data_length >= client_state.buffer_state.buffer.len() {
                     println!("Resizing client buffer");
-                    client_state.buffer.resize(client_state.buffer.len() * 2, 0);
+                    client_state
+                        .buffer_state
+                        .buffer
+                        .resize(client_state.buffer_state.buffer.len() * 2, 0);
                 } else {
                     break 'inner_loop;
                 }
             }
-            data_phase::handle_client(&mut client_state, &db_write, buffer_data_length, &tx).await;
+            data_phase::handle_client(&mut client_state, &db_write, &tx).await;
         }
     });
     let db_spawn = tokio::spawn(async move {
@@ -125,13 +140,13 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
 
             tokio::select! {
                 biased; Some((cache_commands, should_hit_db)) = rx.recv() => {
-                    if let Err(e) = data_phase::handle_db_cache_command(cache_commands, should_hit_db, &mut db_state, &client_write, &mut db_read, &mut buffer_data_length).await {
+                    if let Err(e) = data_phase::handle_db_cache_command(cache_commands, should_hit_db, &mut db_state, &client_write, &mut db_read).await {
                         eprintln!("cache handling failed: {e}");
                         break 'outer_loop;
                     }
                 }
-                result = db_read.read(&mut db_state.buffer[buffer_data_length..]) => {
-                    if let Err(e) = data_phase::handle_db_read(&result, &mut db_state, &client_write, &mut buffer_data_length).await {
+                result = db_read.read(&mut db_state.buffer_state.buffer[buffer_data_length..]) => {
+                    if let Err(e) = data_phase::handle_db_read(&result, &mut db_state, &client_write).await {
                         eprintln!("db read failed: {e}");
                         break 'outer_loop;
                     }

@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::{cache::lfu::CachedResponse, wire::types::CacheCommandCapture};
+use crate::{
+    cache::lfu::CachedResponse,
+    wire::types::{CacheCommandCapture, DescribeKind},
+};
 
 use super::{
     reader::ByteReader,
@@ -16,77 +19,98 @@ use tokio::{
 pub(super) async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
-    buffer_data_length: usize,
     tx: &Sender<(BTreeMap<u16, CacheCommand>, bool)>,
 ) {
     client_state
         .framer
-        .add_buffer(&client_state.buffer[..buffer_data_length]);
+        .add_buffer(&client_state.buffer_state.buffer[..client_state.buffer_state.data_length]);
     while let Ok(Some(msg)) = client_state.framer.next_message() {
         // println!("message: {:?}", msg);
     }
 
-    let mut reader = ByteReader::new(client_state.buffer[..buffer_data_length].to_vec(), 0);
+    let mut reader = ByteReader::new(
+        client_state.buffer_state.buffer[..client_state.buffer_state.data_length].to_vec(),
+        0,
+    );
     if let Ok(messages) = reader.crawl_and_find_messages_client() {
         let (cache_commands, replay_trims, should_hit_db) =
             super::cache_planner::find_cache_related_messages(messages, client_state).await;
 
-        if replay_trims.len() > 0 {
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            let mut writer = ByteWriter::new(&mut client_state.buffer, 0);
-            writer.trim_from_pending_commands(replay_trims);
-        }
         if cache_commands.keys().len() > 0 {
             for (key, command) in cache_commands.iter() {
                 println!("cache command: key/order={}", key);
             }
             let _ = tx.send((cache_commands, should_hit_db)).await;
         }
+        if replay_trims.len() > 0 {
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
+            println!("TRIMMING BUFFER");
+            let mut writer = ByteWriter::new(&mut client_state.buffer_state.buffer, 0);
+            println!("length before trimming: {}", writer.get_buffer().len());
+            writer.trim_from_pending_commands(replay_trims);
+            println!("length after trimming: {}", writer.get_buffer().len());
+        } else {
+            super::stream_try_write(
+                &db_write,
+                &client_state.buffer_state.buffer[..client_state.buffer_state.data_length],
+            )
+            .await;
+        }
     }
-    super::stream_try_write(&db_write, &client_state.buffer[..buffer_data_length]).await;
 }
 
 pub(super) async fn handle_db_read(
     result: &Result<usize, std::io::Error>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
-    buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     match result {
         Ok(n) => {
-            *buffer_data_length += n;
+            db_state.buffer_state.data_length += n;
             loop {
-                if *buffer_data_length == 0 {
+                if db_state.buffer_state.data_length == 0 {
                     break;
                 }
-                if *buffer_data_length >= db_state.buffer.len() {
+                if db_state.buffer_state.data_length >= db_state.buffer_state.buffer.len() {
                     println!("Resizing db buffer");
-                    db_state.buffer.resize(db_state.buffer.len() * 2, 0);
+                    db_state
+                        .buffer_state
+                        .buffer
+                        .resize(db_state.buffer_state.buffer.len() * 2, 0);
                 } else {
                     break;
                 }
             }
+            if !&db_state.buffer_state.buffer[..db_state.buffer_state.data_length].is_empty() {
+                println!(
+                    "Buffer isn't empty its this long: {} and contains this data:{:?}",
+                    &db_state.buffer_state.buffer[..db_state.buffer_state.data_length].len(),
+                    &db_state.buffer_state.buffer[..db_state.buffer_state.data_length]
+                );
 
-            super::stream_try_write(&client_write, &db_state.buffer[..*buffer_data_length]).await;
+                super::stream_try_write(
+                    &client_write,
+                    &db_state.buffer_state.buffer[..db_state.buffer_state.data_length],
+                )
+                .await;
+                db_state
+                    .framer
+                    .add_buffer(&db_state.buffer_state.buffer[..db_state.buffer_state.data_length]);
 
-            db_state
-                .framer
-                .add_buffer(&db_state.buffer[..*buffer_data_length]);
-
-            loop {
-                match db_state.framer.next_message() {
-                    Ok(option) => match option {
-                        Some(bytes) => {
-                            // println!("framed type byte:{}", bytes[0])
+                loop {
+                    match db_state.framer.next_message() {
+                        Ok(option) => match option {
+                            Some(bytes) => {
+                                // println!("framed type byte:{}", bytes[0])
+                            }
+                            None => break,
+                        },
+                        Err(err) => {
+                            eprintln!("Something went wrong while framing: {}", err);
+                            return Err(format!("Something went wrong while framing: {}", err));
                         }
-                        None => break,
-                    },
-                    Err(err) => {
-                        eprintln!("Something went wrong while framing: {}", err);
-                        return Err(format!("Something went wrong while framing: {}", err));
                     }
                 }
             }
@@ -105,7 +129,6 @@ pub(super) async fn handle_db_cache_command(
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
-    buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
 
@@ -117,8 +140,31 @@ pub(super) async fn handle_db_cache_command(
                 CacheCommand::Replay(cmd) => {
                     println!("replay: {:?}", cmd.data);
                     let mut buf = Vec::new();
+                    // THE ORDER MATTERS IN THE MATCH BELOW!!
+                    match cmd.describe_kind {
+                        DescribeKind::Statement => {
+                            if let Some(param_desc) = &cmd.data.param_desc
+                                && let Some(row_desc) = &cmd.data.row_desc
+                            {
+                                buf.extend_from_slice(param_desc);
+                                buf.extend_from_slice(row_desc);
+                            } else {
+                                return Err(format!(
+                                    "Statement cache replay missing param_desc or row_desc"
+                                ));
+                            }
+                        }
+                        DescribeKind::Portal => {
+                            if let Some(row_desc) = &cmd.data.row_desc {
+                                buf.extend_from_slice(row_desc);
+                            } else {
+                                return Err(format!("Portal cache replay missing row_desc"));
+                            }
+                        }
+                        _ => {}
+                    }
                     buf.extend_from_slice(&cmd.data.data);
-                    // buf.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                    buf.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
                     super::stream_try_write(client_write, &buf).await;
 
                     // println!("{:?}", &[b'Z', 0, 0, 0, 5, b'I']);
@@ -127,14 +173,7 @@ pub(super) async fn handle_db_cache_command(
                 }
                 CacheCommand::Capture(cmd) => {
                     println!("capture: {:?}", cmd.key);
-                    let _ = handle_db_capture_command(
-                        cmd,
-                        db_state,
-                        client_write,
-                        db_read,
-                        buffer_data_length,
-                    )
-                    .await;
+                    let _ = handle_db_capture_command(cmd, db_state, client_write, db_read).await;
                     // capture_target = Some((cmd.key.clone(), cmd.query.clone()));
                     // has_cache_miss = true;
                     break;
@@ -143,7 +182,7 @@ pub(super) async fn handle_db_cache_command(
         }
         //     if has_cache_miss || should_hit_db {
         //         match db_read
-        //             .read(&mut db_state.buffer[*buffer_data_length..])
+        //             .read(&mut db_state.buffer_state.buffer[*buffer_data_length..])
         //             .await
         //         {
         //             Ok(n) => {
@@ -152,9 +191,9 @@ pub(super) async fn handle_db_cache_command(
         //                     if *buffer_data_length == 0 {
         //                         break 'inner_loop;
         //                     }
-        //                     if *buffer_data_length >= db_state.buffer.len() {
+        //                     if *buffer_data_length >= db_state.buffer_state.buffer.len() {
         //                         println!("Resizing db buffer");
-        //                         db_state.buffer.resize(db_state.buffer.len() * 2, 0);
+        //                         db_state.buffer_state.buffer.resize(db_state.buffer_state.buffer.len() * 2, 0);
         //                     } else {
         //                         break 'inner_loop;
         //                     }
@@ -166,10 +205,10 @@ pub(super) async fn handle_db_cache_command(
         //             }
         //         }
         //     }
-        //     super::stream_try_write(client_write, &db_state.buffer[..*buffer_data_length]).await;
+        //     super::stream_try_write(client_write, &db_state.buffer_state.buffer[..*buffer_data_length]).await;
         //     db_state
         //         .framer
-        //         .add_buffer(&db_state.buffer[..*buffer_data_length]);
+        //         .add_buffer(&db_state.buffer_state.buffer[..*buffer_data_length]);
         //     let mut capture_end = false;
         //     let mut cached_response = CachedResponse {
         //         data: Vec::new(),
@@ -221,7 +260,7 @@ pub(super) async fn handle_db_cache_command(
         // // This should never happen, BUT as a precaution we handle it by sending the DB response to the client
         // else {
         //     let result = db_read
-        //         .read(&mut db_state.buffer[*buffer_data_length..])
+        //         .read(&mut db_state.buffer_state.buffer[*buffer_data_length..])
         //         .await;
         //     handle_db_read(&result, db_state, client_write, buffer_data_length).await?;
     }
@@ -233,21 +272,23 @@ pub(super) async fn handle_db_capture_command(
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
-    buffer_data_length: &mut usize,
 ) -> Result<(), String> {
     match db_read
-        .read(&mut db_state.buffer[*buffer_data_length..])
+        .read(&mut db_state.buffer_state.buffer[db_state.buffer_state.data_length..])
         .await
     {
         Ok(n) => {
-            *buffer_data_length += n;
+            db_state.buffer_state.data_length += n;
             'inner_loop: loop {
-                if *buffer_data_length == 0 {
+                if db_state.buffer_state.data_length == 0 {
                     break 'inner_loop;
                 }
-                if *buffer_data_length >= db_state.buffer.len() {
+                if db_state.buffer_state.data_length >= db_state.buffer_state.buffer.len() {
                     println!("Resizing db buffer");
-                    db_state.buffer.resize(db_state.buffer.len() * 2, 0);
+                    db_state
+                        .buffer_state
+                        .buffer
+                        .resize(db_state.buffer_state.buffer.len() * 2, 0);
                 } else {
                     break 'inner_loop;
                 }
@@ -258,11 +299,15 @@ pub(super) async fn handle_db_capture_command(
             return Err(err.to_string());
         }
     };
-    super::stream_try_write(client_write, &db_state.buffer[..*buffer_data_length]).await;
+    super::stream_try_write(
+        client_write,
+        &db_state.buffer_state.buffer[..db_state.buffer_state.data_length],
+    )
+    .await;
 
     db_state
         .framer
-        .add_buffer(&db_state.buffer[..*buffer_data_length]);
+        .add_buffer(&db_state.buffer_state.buffer[..db_state.buffer_state.data_length]);
 
     let mut cached_response = CachedResponse {
         data: Vec::new(),
@@ -282,15 +327,9 @@ pub(super) async fn handle_db_capture_command(
                             break;
                         }
                         //ParameterDescription
-                        b't' => {
-                            cached_response.data.extend_from_slice(&bytes);
-                            cached_response.param_desc = Some(bytes)
-                        }
+                        b't' => cached_response.param_desc = Some(bytes),
                         //RowDescription
-                        b'T' => {
-                            cached_response.data.extend_from_slice(&bytes);
-                            cached_response.row_desc = Some(bytes)
-                        }
+                        b'T' => cached_response.row_desc = Some(bytes),
                         //CommandComplete
                         b'C' => {
                             cached_response.data.extend_from_slice(&bytes);

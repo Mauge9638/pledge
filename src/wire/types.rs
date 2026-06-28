@@ -1,8 +1,18 @@
-use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io::{Error, ErrorKind},
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
 
 use super::MessageFramer;
 use crate::{AppState, cache::lfu::CachedResponse};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::{
+    io::AsyncReadExt,
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
+use uuid::serde::compact;
 
 #[derive(Debug)]
 pub(super) enum WireProtocolStates {
@@ -35,23 +45,63 @@ pub(super) struct ProtocolState {
 
 pub(super) struct ClientState {
     pub app_state: AppState,
-    pub buffer: Vec<u8>,
     pub prepared_statements: HashMap<String, PreparedStatement>,
     pub portals: HashMap<String, Portal>,
     pub framer: MessageFramer,
+    pub buffer_state: BufferState,
 }
 
 pub(super) struct DBState {
     pub app_state: AppState,
-    pub buffer: Vec<u8>,
     pub framer: MessageFramer,
+    pub buffer_state: BufferState,
 }
 
-pub(super) struct Streams {
-    pub client_read: OwnedReadHalf,
-    pub client_write: OwnedWriteHalf,
-    pub db_read: OwnedReadHalf,
-    pub db_write: OwnedWriteHalf,
+pub(super) struct BufferState {
+    pub buffer: Vec<u8>,
+    pub read_cursor: usize,
+    pub write_cursor: usize,
+}
+
+impl BufferState {
+    pub async fn read_from_stream(&mut self, stream: &mut OwnedReadHalf) -> Result<usize, Error> {
+        let free_space = self.buffer.len() - self.write_cursor;
+        if free_space < self.buffer.len() / 4 {
+            self.compact();
+        }
+        if self.write_cursor >= self.buffer.len() {
+            self.buffer.resize(self.buffer.len() * 2, 0);
+        }
+        let read = stream.read(&mut self.buffer[self.write_cursor..]).await?;
+        self.write_cursor += read;
+        Ok(read)
+    }
+    pub fn compact(&mut self) {
+        if self.read_cursor > 0 {
+            self.buffer
+                .copy_within(self.read_cursor..self.write_cursor, 0);
+            self.write_cursor -= self.read_cursor;
+            self.read_cursor = 0;
+        }
+    }
+    pub fn pending_data(&self) -> &[u8] {
+        &self.buffer[self.read_cursor..self.write_cursor]
+    }
+    pub fn consume(&mut self, n: usize) -> Result<(), Error> {
+        match self.read_cursor + n <= self.write_cursor {
+            true => {
+                self.read_cursor += n;
+                Ok(())
+            }
+            false => Err(Error::new(
+                ErrorKind::InvalidData,
+                "consume: n is larger than pending data",
+            )),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.read_cursor == self.write_cursor
+    }
 }
 
 pub(super) enum StateHandlingResult {
@@ -128,6 +178,7 @@ pub(super) struct ReplayTrimExtended {
     pub parse: Option<Range<usize>>,
     pub bind: Option<Range<usize>>,
     pub describe: Option<Range<usize>>,
+    pub sync: Option<Range<usize>>,
 }
 
 impl ReplayTrimExtended {
@@ -137,6 +188,7 @@ impl ReplayTrimExtended {
             parse: None,
             bind: None,
             describe: None,
+            sync: None,
         }
     }
 }

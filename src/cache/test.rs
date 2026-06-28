@@ -94,7 +94,11 @@ fn test_insert_and_get() {
     let mut inner = CacheInner::new(10 * 1024 * 1024);
     inner.insert(
         "key1".to_string(),
-        b"value1".to_vec(),
+        Arc::new(CachedResponse {
+            data: b"value1".to_vec(),
+            param_desc: None,
+            row_desc: None,
+        }),
         Instant::now() + Duration::from_secs(60),
     );
 
