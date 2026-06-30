@@ -1,18 +1,23 @@
 use std::ops::Range;
 
+use crate::wire::BufferState;
+
 use super::ReplayTrim;
 
 pub(super) struct ByteWriter<'a> {
-    buffer: &'a mut Vec<u8>,
+    buffer_state: &'a mut BufferState,
     cursor: usize,
 }
 
 impl<'a> ByteWriter<'a> {
-    pub(super) fn new(buffer: &'a mut Vec<u8>, cursor: usize) -> Self {
-        Self { buffer, cursor }
+    pub(super) fn new(buffer_state: &'a mut BufferState, cursor: usize) -> Self {
+        Self {
+            buffer_state,
+            cursor,
+        }
     }
     pub(super) fn get_buffer(&self) -> &Vec<u8> {
-        &self.buffer
+        &self.buffer_state.buffer
     }
 
     pub(super) fn slice_out_section(&self, start: usize, end: usize) -> Vec<u8> {

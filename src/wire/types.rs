@@ -87,7 +87,7 @@ impl BufferState {
     pub fn pending_data(&self) -> &[u8] {
         &self.buffer[self.read_cursor..self.write_cursor]
     }
-    pub fn consume(&mut self, n: usize) -> Result<(), Error> {
+    pub fn consume(&mut self, n: &usize) -> Result<(), Error> {
         match self.read_cursor + n <= self.write_cursor {
             true => {
                 self.read_cursor += n;
