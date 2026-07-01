@@ -24,7 +24,7 @@ impl<'a> ByteWriter<'a> {
         let len = end - start;
         let mut result = Vec::with_capacity(len);
         for i in 0..len {
-            result.push(self.buffer[start + i]);
+            result.push(self.buffer_state.buffer[start + i]);
         }
         result
     }
@@ -64,10 +64,11 @@ impl<'a> ByteWriter<'a> {
     fn drain_section(&mut self, section: Range<usize>, offset: usize) -> usize {
         println!(
             "current buffer len:{}, trying to drain: {:?}",
-            &self.buffer.len(),
+            &self.buffer_state.buffer.len(),
             &section
         );
-        self.buffer
+        self.buffer_state
+            .buffer
             .drain((section.start - offset)..(section.end - offset));
         return offset + section.end - section.start;
     }

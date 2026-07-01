@@ -7,7 +7,7 @@ use std::{
 };
 
 use super::MessageFramer;
-use crate::{AppState, cache::lfu::CachedResponse};
+use crate::{AppState, cache::lfu::CachedResponse, wire::writer::ByteWriter};
 use tokio::{
     io::AsyncReadExt,
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -87,6 +87,16 @@ impl BufferState {
     pub fn pending_data(&self) -> &[u8] {
         &self.buffer[self.read_cursor..self.write_cursor]
     }
+
+    pub fn pending_data_excluding(&self, exclude_ranges: &[Range<usize>]) -> Option<Vec<u8>> {
+        let buffer = Vec::new();
+        for range in exclude_ranges {}
+        if buffer.len() > 0 {
+            return Some(buffer);
+        }
+        None
+    }
+
     pub fn consume(&mut self, n: &usize) -> Result<(), Error> {
         match self.read_cursor + n <= self.write_cursor {
             true => {
