@@ -39,18 +39,16 @@ pub(super) async fn handle_client(
             }
             let _ = tx.send((cache_commands, should_hit_db)).await;
         }
-        if replay_trims.len() > 0 {
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            println!("TRIMMING BUFFER");
-            let mut writer = ByteWriter::new(&mut client_state.buffer_state, 0);
-            println!("length before trimming: {}", writer.get_buffer().len());
-            writer.trim_from_pending_commands(replay_trims);
-            println!("length after trimming: {}", writer.get_buffer().len());
-        } else {
-            super::stream_try_write(&db_write, client_state.buffer_state.pending_data()).await;
+
+        if let Some(buffer_to_be_sent) = client_state
+            .buffer_state
+            .pending_data_excluding(&replay_trims)
+        {
+            super::stream_try_write(&db_write, &buffer_to_be_sent).await;
         }
+        let _ = client_state
+            .buffer_state
+            .consume(&client_state.buffer_state.pending_data_len());
     }
 }
 
@@ -58,31 +56,15 @@ pub(super) async fn handle_db_read(
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
 ) -> Result<(), String> {
-    let db_buffer = db_state.buffer_state.pending_data();
-    println!(
-        "Buffer isn't empty its this long: {} and contains this data:{:?}",
-        db_buffer.len(),
-        db_buffer
-    );
-
-    super::stream_try_write(&client_write, db_buffer).await;
-    db_state.framer.add_buffer(db_buffer);
-
-    loop {
-        match db_state.framer.next_message() {
-            Ok(option) => match option {
-                Some(bytes) => {
-                    // println!("framed type byte:{}", bytes[0])
-                }
-                None => break,
-            },
-            Err(err) => {
-                eprintln!("Something went wrong while framing: {}", err);
-                return Err(format!("Something went wrong while framing: {}", err));
-            }
-        }
-    }
-    if let Err(err) = db_state.buffer_state.consume(&db_buffer.len()) {
+    println!("IN HANDLE_DB_READ");
+    println!("IN HANDLE_DB_READ");
+    println!("IN HANDLE_DB_READ");
+    println!("IN HANDLE_DB_READ");
+    super::stream_try_write(&client_write, db_state.buffer_state.pending_data()).await;
+    if let Err(err) = db_state
+        .buffer_state
+        .consume(&db_state.buffer_state.pending_data_len())
+    {
         eprintln!("Error occurred: {}", err);
         return Err(err.to_string());
     }
@@ -96,6 +78,9 @@ pub(super) async fn handle_db_cache_command(
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
+    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
+    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
+    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
     println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
 
     if cache_commands.len() > 0 {

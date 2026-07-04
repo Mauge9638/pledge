@@ -84,17 +84,28 @@ impl BufferState {
             self.read_cursor = 0;
         }
     }
+
+    pub fn pending_data_len(&self) -> usize {
+        self.write_cursor - self.read_cursor
+    }
+
     pub fn pending_data(&self) -> &[u8] {
         &self.buffer[self.read_cursor..self.write_cursor]
     }
 
-    pub fn pending_data_excluding(&self, exclude_ranges: &[Range<usize>]) -> Option<Vec<u8>> {
-        let buffer = Vec::new();
-        for range in exclude_ranges {}
-        if buffer.len() > 0 {
+    // This can and should be optimized at some point
+    pub fn pending_data_excluding(&mut self, replay_trim: &[ReplayTrim]) -> Option<Vec<u8>> {
+        if replay_trim.is_empty() {
+            return Some(self.pending_data().to_vec());
+        }
+        let mut buffer = self.buffer[self.read_cursor..self.write_cursor].to_vec();
+        let mut writer = ByteWriter::new(&mut buffer, 0);
+        writer.trim_from_pending_commands(replay_trim, Some(self.read_cursor));
+
+        if writer.get_buffer().len() > 0 {
             return Some(buffer);
         }
-        None
+        return None;
     }
 
     pub fn consume(&mut self, n: &usize) -> Result<(), Error> {

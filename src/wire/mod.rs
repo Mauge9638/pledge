@@ -118,6 +118,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
         }
         return;
     });
+
     let db_spawn = tokio::spawn(async move {
         loop {
             tokio::select! {
