@@ -100,7 +100,7 @@ impl BufferState {
         }
         let mut buffer = self.buffer[self.read_cursor..self.write_cursor].to_vec();
         let mut writer = ByteWriter::new(&mut buffer, 0);
-        writer.trim_from_pending_commands(replay_trim, Some(self.read_cursor));
+        writer.trim_from_pending_commands(replay_trim);
 
         if writer.get_buffer().len() > 0 {
             return Some(buffer);

@@ -26,15 +26,8 @@ impl<'a> ByteWriter<'a> {
         result
     }
 
-    pub(super) fn trim_from_pending_commands(
-        &mut self,
-        pending_commands: &'a [ReplayTrim],
-        start_offset: Option<usize>,
-    ) {
-        let mut removed_indexes = match start_offset {
-            Some(offset) => offset,
-            None => 0,
-        };
+    pub(super) fn trim_from_pending_commands(&mut self, pending_commands: &'a [ReplayTrim]) {
+        let mut removed_indexes = 0;
         for command in pending_commands {
             match command {
                 ReplayTrim::Extended(command) => {
