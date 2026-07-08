@@ -48,7 +48,6 @@ impl MessageFramer {
         if self.buffer.len() < self.cursor + length + 1 {
             return Ok(None); // The message is probably seperated by two streams
         }
-        //self.cursor = length - 1;
         let message = self.buffer[self.cursor..(self.cursor + length + 1)].to_vec();
         self.cursor = self.cursor + length + 1;
         Ok(Some(message))

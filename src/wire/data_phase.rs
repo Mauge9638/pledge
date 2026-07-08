@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+se std::collections::BTreeMap;
 
 use crate::{
     cache::lfu::CachedResponse,
-    wire::types::{CacheCommandCapture, DescribeKind},
+    wire::types::{CommandSlotCapture, DescribeKind},
 };
 
 use super::{
     reader::ByteReader,
-    types::{CacheCommand, ClientState, DBState},
+    types::{ClientState, CommandSlot, DBState},
     writer::ByteWriter,
 };
 use tokio::{
@@ -19,7 +19,7 @@ use tokio::{
 pub(super) async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
-    tx: &Sender<(BTreeMap<u16, CacheCommand>, bool)>,
+    tx: &Sender<(BTreeMap<u16, CommandSlot>, bool)>,
 ) {
     client_state
         .framer
@@ -34,9 +34,7 @@ pub(super) async fn handle_client(
             super::cache_planner::find_cache_related_messages(messages, client_state).await;
 
         if cache_commands.keys().len() > 0 {
-            for (key, command) in cache_commands.iter() {
-                println!("cache command: key/order={}", key);
-            }
+            for (key, command) in cache_commands.iter() {}
             let _ = tx.send((cache_commands, should_hit_db)).await;
         }
 
@@ -56,10 +54,6 @@ pub(super) async fn handle_db_read(
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
 ) -> Result<(), String> {
-    println!("IN HANDLE_DB_READ");
-    println!("IN HANDLE_DB_READ");
-    println!("IN HANDLE_DB_READ");
-    println!("IN HANDLE_DB_READ");
     super::stream_try_write(&client_write, db_state.buffer_state.pending_data()).await;
     if let Err(err) = db_state
         .buffer_state
@@ -72,23 +66,18 @@ pub(super) async fn handle_db_read(
 }
 
 pub(super) async fn handle_db_cache_command(
-    cache_commands: BTreeMap<u16, CacheCommand>,
+    slot_commands: BTreeMap<u16, CommandSlot>,
     should_hit_db: bool,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
-    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
-    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
-    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
-    println!("LOOKING AT CACHE COMMANDS IN DB_CACHED HANDLER");
-
-    if cache_commands.len() > 0 {
+    if slot_commands.len() > 0 {
         // let mut capture_target: Option<(String, String)> = None;
         // let mut has_cache_miss: bool = false;
-        for (_, command) in &cache_commands {
+        for (_, command) in &slot_commands {
             match command {
-                CacheCommand::Replay(cmd) => {
+                CommandSlot::Replay(cmd) => {
                     println!("replay: {:?}", cmd.data);
                     let mut buf = Vec::new();
                     // THE ORDER MATTERS IN THE MATCH BELOW!!
@@ -122,13 +111,14 @@ pub(super) async fn handle_db_cache_command(
 
                     // super::stream_try_write(client_write, &[b'Z', 0, 0, 0, 5, b'I']).await;
                 }
-                CacheCommand::Capture(cmd) => {
+                CommandSlot::Capture(cmd) => {
                     println!("capture: {:?}", cmd.key);
                     let _ = handle_db_capture_command(cmd, db_state, client_write, db_read).await;
                     // capture_target = Some((cmd.key.clone(), cmd.query.clone()));
                     // has_cache_miss = true;
                     break;
                 }
+                _ => {}
             }
         }
     }
@@ -136,7 +126,7 @@ pub(super) async fn handle_db_cache_command(
 }
 
 pub(super) async fn handle_db_capture_command(
-    cache_command: &CacheCommandCapture,
+    cache_command: &CommandSlotCapture,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
@@ -166,7 +156,6 @@ pub(super) async fn handle_db_capture_command(
                     match bytes[0] {
                         // ReadyForQuery
                         b'Z' => {
-                            println!("{:?}", &bytes);
                             break;
                         }
                         //ParameterDescription

@@ -159,13 +159,19 @@ pub(super) enum ProtocolMode {
 }
 
 #[derive(Clone)]
-pub(super) enum CacheCommand {
-    Replay(CacheCommandReplay),   // cache hit: write these to client, skip DB
-    Capture(CacheCommandCapture), // cache miss: next DB response belongs to this key
+pub(super) enum CommandSlot {
+    Passthrough(CommandSlotPassthrough), // not configured: clean passthrough to the db
+    Replay(CommandSlotReplay),           // cache hit: write these to client, skip DB
+    Capture(CommandSlotCapture),         // cache miss: next DB response belongs to this key
 }
 
 #[derive(Clone)]
-pub(super) struct CacheCommandReplay {
+pub(super) struct CommandSlotPassthrough {
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub(super) struct CommandSlotReplay {
     pub key: String,
     pub data: Arc<CachedResponse>,
     pub describe_kind: DescribeKind,
@@ -174,7 +180,7 @@ pub(super) struct CacheCommandReplay {
 }
 
 #[derive(Clone)]
-pub(super) struct CacheCommandCapture {
+pub(super) struct CommandSlotCapture {
     pub key: String,
     pub describe_kind: DescribeKind,
     pub protocol_mode: ProtocolMode,

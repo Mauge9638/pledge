@@ -16,7 +16,7 @@ use messages::Decode;
 use crate::config::DatabaseConfig;
 use crate::{AppState, wire::types::BufferState};
 use reader::ByteReader;
-use types::{CacheCommand, ClientState, DBState, ReplayTrim};
+use types::{ClientState, CommandSlot, DBState, ReplayTrim};
 
 use message_framer::MessageFramer;
 
@@ -119,25 +119,42 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
         return;
     });
 
+    // let db_spawn = tokio::spawn(async move {
+    //     loop {
+    //         tokio::select! {
+    //             biased; Some((cache_commands, should_hit_db)) = rx.recv() => {
+    //                 if let Err(e) = data_phase::handle_db_cache_command(cache_commands, should_hit_db, &mut db_state, &client_write, &mut db_read).await {
+    //                     eprintln!("cache handling failed: {e}");
+    //                     break
+    //                 }
+    //             }
+    //             _ = db_state.buffer_state.read_from_stream(&mut db_read) => {
+    //                 if let Err(e) = data_phase::handle_db_read( &mut db_state, &client_write).await {
+    //                     eprintln!("db read failed: {e}");
+    //                     break
+    //                 }
+    //             }
+    //         }
+    //     }
+    // });
     let db_spawn = tokio::spawn(async move {
         loop {
-            tokio::select! {
-                biased; Some((cache_commands, should_hit_db)) = rx.recv() => {
-                    if let Err(e) = data_phase::handle_db_cache_command(cache_commands, should_hit_db, &mut db_state, &client_write, &mut db_read).await {
-                        eprintln!("cache handling failed: {e}");
-                        break
-                    }
-                }
-                _ = db_state.buffer_state.read_from_stream(&mut db_read) => {
-                    if let Err(e) = data_phase::handle_db_read( &mut db_state, &client_write).await {
-                        eprintln!("db read failed: {e}");
-                        break
-                    }
+            if let Some((command_slot, should_hit_db)) = rx.recv().await {
+                if let Err(e) = data_phase::handle_db_cache_command(
+                    command_slot,
+                    should_hit_db,
+                    &mut db_state,
+                    &client_write,
+                    &mut db_read,
+                )
+                .await
+                {
+                    eprintln!("cache handling failed: {e}");
+                    break;
                 }
             }
         }
     });
-
     let handles = tokio::join!(client_spawn, db_spawn);
 }
 

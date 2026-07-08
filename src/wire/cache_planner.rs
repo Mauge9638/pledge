@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    io::Error,
     ops::Range,
     sync::Arc,
     time::{Duration, Instant},
@@ -8,21 +9,25 @@ use std::{
 use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
-    wire::types::{CacheCommandCapture, CacheCommandReplay, CachePlan},
+    wire::{
+        Decode, MessageFramer, data_phase,
+        types::{CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay},
+    },
 };
 
 use super::{
     messages::{
-        BindMessageContent, ClientMessageContent,
+        Bind, BindMessageContent, ClientMessageContent,
         ClientMessageContent::{
             BindMessage, DescribeMessage, ExecuteMessage, ParseMessage, QueryMessage, SyncMessage,
             UnknownMessage,
         },
-        DescribeMessageContent, DescribeMessageContentTarget, ExecuteMessageContent,
-        ParseMessageContent,
+        Describe, DescribeMessageContent, DescribeMessageContentTarget, Execute,
+        ExecuteMessageContent, Parse, ParseMessageContent, Query,
     },
+    reader::ByteReaderError,
     types::{
-        CacheCommand, ClientState, DescribeKind, Portal, PreparedStatement, ProtocolMode,
+        ClientState, CommandSlot, DescribeKind, Portal, PreparedStatement, ProtocolMode,
         ReplayTrim, ReplayTrimExtended, ReplayTrimSimple, StateHandlingResult,
     },
 };
@@ -87,12 +92,76 @@ pub(super) fn resolve_ttl(app_state: &AppState, query: &str) -> Option<Duration>
     return Some(ttl);
 }
 
+pub(super) async fn find_command_slot_messages(
+    client_state: &mut ClientState,
+    bytes: &[u8],
+) -> Result<Vec<CommandSlot>, Error> {
+    let mut command_slots: Vec<CommandSlot> = Vec::new();
+
+    client_state.framer.add_buffer(bytes);
+
+    while let Ok(Some(msg)) = client_state.framer.next_message() {
+        let type_byte = msg[0];
+        let data = {
+            if msg.len() > 5 {
+                msg[5..].to_vec()
+            } else {
+                return Err(Error::new(
+                    std::io::ErrorKind::Other,
+                    "unexpected message type, it should have data", // None of the message types we expect should have this
+                ));
+            }
+        };
+        match type_byte {
+            b'Q' => {
+                let query_data = match (Query { bytes: data }).decode() {
+                    Ok(decoded) => decoded,
+                    Err(e) => return Err(Error::new(std::io::ErrorKind::Other, e.message)),
+                };
+
+                let cache_plan = match find_template_simple(&query_data.query, client_state) {
+                    Some(cache_plan) => cache_plan,
+                    None => {
+                        command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
+                            bytes: msg.to_vec(),
+                        }));
+                        continue;
+                    }
+                };
+                let cache_command = match get_from_cache(client_state, &cache_plan.key) {
+                    Some(cached_response) => CommandSlot::Replay(CommandSlotReplay {
+                        data: cached_response,
+                        describe_kind: DescribeKind::None,
+                        protocol_mode: ProtocolMode::Simple,
+                        query: query_data.query,
+                        key: cache_plan.key,
+                    }),
+                    None => CommandSlot::Capture(CommandSlotCapture {
+                        key: cache_plan.key,
+                        describe_kind: DescribeKind::None,
+                        protocol_mode: ProtocolMode::Simple,
+                        query: query_data.query,
+                        ttl: cache_plan.ttl,
+                    }),
+                };
+            }
+            _ => {
+                return Err(Error::new(
+                    std::io::ErrorKind::Other,
+                    "unexpected message type, the type byte is unrecognized",
+                ));
+            }
+        }
+    }
+    return Ok(command_slots);
+}
+
 pub(super) async fn find_cache_related_messages(
     messages: Vec<ClientMessageContent>,
     client_state: &mut ClientState,
-) -> (BTreeMap<u16, CacheCommand>, Vec<ReplayTrim>, bool) {
+) -> (BTreeMap<u16, CommandSlot>, Vec<ReplayTrim>, bool) {
     let mut should_hit_db = false; // This just signals if a non cache configured query is in the messages
-    let mut cache_commands: BTreeMap<u16, CacheCommand> = BTreeMap::new();
+    let mut cache_commands: BTreeMap<u16, CommandSlot> = BTreeMap::new();
     let mut replay_trims: Vec<ReplayTrim> = Vec::new();
     let mut parse_messages: Vec<(ParseMessageContent, usize, usize)> = Vec::new();
     let mut bind_messages: Vec<(BindMessageContent, usize, usize)> = Vec::new();
@@ -111,14 +180,14 @@ pub(super) async fn find_cache_related_messages(
                     }
                 };
                 let cache_command = match get_from_cache(client_state, &cache_plan.key) {
-                    Some(cached_response) => CacheCommand::Replay(CacheCommandReplay {
+                    Some(cached_response) => CommandSlot::Replay(CommandSlotReplay {
                         data: cached_response,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
                         query: data.query,
                         key: cache_plan.key,
                     }),
-                    None => CacheCommand::Capture(CacheCommandCapture {
+                    None => CommandSlot::Capture(CommandSlotCapture {
                         key: cache_plan.key,
                         describe_kind: DescribeKind::None,
                         protocol_mode: ProtocolMode::Simple,
@@ -237,7 +306,7 @@ pub(super) async fn find_cache_related_messages(
                         Some(cached_response)
                             if cache_data_can_satisfy(cached_response, &describe_kind) =>
                         {
-                            CacheCommand::Replay(CacheCommandReplay {
+                            CommandSlot::Replay(CommandSlotReplay {
                                 data: cached_response.clone(),
                                 describe_kind,
                                 protocol_mode: ProtocolMode::Extended,
@@ -245,7 +314,7 @@ pub(super) async fn find_cache_related_messages(
                                 key: cache_plan.key.clone(),
                             })
                         }
-                        _ => CacheCommand::Capture(CacheCommandCapture {
+                        _ => CommandSlot::Capture(CommandSlotCapture {
                             key: cache_plan.key,
                             describe_kind,
                             protocol_mode: ProtocolMode::Extended,
@@ -256,7 +325,7 @@ pub(super) async fn find_cache_related_messages(
 
                     cache_commands.insert(order, cache_command.clone());
                     order += 1;
-                    if let CacheCommand::Replay { .. } = cache_command {
+                    if let CommandSlot::Replay { .. } = cache_command {
                         replay_trims.push(ReplayTrim::Extended(ReplayTrimExtended {
                             execute: Range { start, end },
                             parse: {
