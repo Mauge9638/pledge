@@ -1,8 +1,11 @@
-se std::collections::BTreeMap;
+use std::collections::BTreeMap;
 
 use crate::{
     cache::lfu::CachedResponse,
-    wire::types::{CommandSlotCapture, DescribeKind},
+    wire::{
+        messages::DBMessageContent,
+        types::{CommandSlotCapture, DescribeKind},
+    },
 };
 
 use super::{
@@ -19,35 +22,56 @@ use tokio::{
 pub(super) async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
-    tx: &Sender<(BTreeMap<u16, CommandSlot>, bool)>,
+    tx: &Sender<BTreeMap<u32, CommandSlot>>,
 ) {
-    client_state
-        .framer
-        .add_buffer(client_state.buffer_state.pending_data());
-    while let Ok(Some(msg)) = client_state.framer.next_message() {
-        // println!("message: {:?}", msg);
+    super::stream_try_write(&db_write, client_state.buffer_state.pending_data()).await;
+
+    match super::cache_planner::find_command_slot_messages(client_state).await {
+        Ok(command_slots) => {
+            if let Err(err) = tx.send(command_slots).await {
+                eprintln!("failed to send command slots: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}")
+        }
     }
 
-    let mut reader = ByteReader::new(client_state.buffer_state.pending_data().to_vec(), 0);
-    if let Ok(messages) = reader.crawl_and_find_messages_client() {
-        let (cache_commands, replay_trims, should_hit_db) =
-            super::cache_planner::find_cache_related_messages(messages, client_state).await;
+    let _ = client_state
+        .buffer_state
+        .consume(&client_state.buffer_state.pending_data_len());
+}
 
-        if cache_commands.keys().len() > 0 {
-            for (key, command) in cache_commands.iter() {}
-            let _ = tx.send((cache_commands, should_hit_db)).await;
-        }
-
-        if let Some(buffer_to_be_sent) = client_state
+pub(super) async fn handle_db(
+    command_slots: BTreeMap<u32, CommandSlot>,
+    db_state: &mut DBState,
+    client_write: &OwnedWriteHalf,
+    db_read: &mut OwnedReadHalf,
+) -> Result<(), String> {
+    // for (slot, command) in command_slots {
+    //     match command {
+    //         CommandSlot::Passthrough(data) => {
+    //             let _ = super::stream_try_write(client_write, &data.bytes).await;
+    //         }
+    //         _ => {}
+    //     }
+    // }
+    'read_loop: loop {
+        let _ = db_state.buffer_state.read_from_stream(db_read).await;
+        super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
+        db_state
+            .framer
+            .add_buffer(db_state.buffer_state.pending_data());
+        let _ = db_state
             .buffer_state
-            .pending_data_excluding(&replay_trims)
-        {
-            super::stream_try_write(&db_write, &buffer_to_be_sent).await;
+            .consume(&db_state.buffer_state.pending_data_len());
+        while let Ok(Some(msg)) = db_state.framer.next_message() {
+            if msg[0] == b'Z' {
+                break 'read_loop;
+            }
         }
-        let _ = client_state
-            .buffer_state
-            .consume(&client_state.buffer_state.pending_data_len());
     }
+    return Ok(());
 }
 
 pub(super) async fn handle_db_read(
@@ -106,16 +130,10 @@ pub(super) async fn handle_db_cache_command(
                     buf.extend_from_slice(&cmd.data.data);
                     buf.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
                     super::stream_try_write(client_write, &buf).await;
-
-                    // println!("{:?}", &[b'Z', 0, 0, 0, 5, b'I']);
-
-                    // super::stream_try_write(client_write, &[b'Z', 0, 0, 0, 5, b'I']).await;
                 }
                 CommandSlot::Capture(cmd) => {
                     println!("capture: {:?}", cmd.key);
                     let _ = handle_db_capture_command(cmd, db_state, client_write, db_read).await;
-                    // capture_target = Some((cmd.key.clone(), cmd.query.clone()));
-                    // has_cache_miss = true;
                     break;
                 }
                 _ => {}

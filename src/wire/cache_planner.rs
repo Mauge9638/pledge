@@ -6,6 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use time::format_description::parse;
+
 use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
@@ -94,56 +96,165 @@ pub(super) fn resolve_ttl(app_state: &AppState, query: &str) -> Option<Duration>
 
 pub(super) async fn find_command_slot_messages(
     client_state: &mut ClientState,
-    bytes: &[u8],
-) -> Result<Vec<CommandSlot>, Error> {
-    let mut command_slots: Vec<CommandSlot> = Vec::new();
+) -> Result<BTreeMap<u32, CommandSlot>, Error> {
+    let mut command_slots: BTreeMap<u32, CommandSlot> = BTreeMap::new();
+    let mut parse_messages: BTreeMap<u32, (Vec<u8>, ParseMessageContent)> = BTreeMap::new();
+    let mut bind_messages: BTreeMap<u32, (Vec<u8>, BindMessageContent)> = BTreeMap::new();
+    let mut describe_messages: BTreeMap<u32, (Vec<u8>, DescribeMessageContent)> = BTreeMap::new();
+    let mut order: Option<u32> = None;
 
-    client_state.framer.add_buffer(bytes);
+    client_state
+        .framer
+        .add_buffer(client_state.buffer_state.pending_data());
 
     while let Ok(Some(msg)) = client_state.framer.next_message() {
-        let type_byte = msg[0];
-        let data = {
-            if msg.len() > 5 {
-                msg[5..].to_vec()
-            } else {
-                return Err(Error::new(
-                    std::io::ErrorKind::Other,
-                    "unexpected message type, it should have data", // None of the message types we expect should have this
-                ));
+        match order {
+            Some(order_val) => {
+                order = Some(order_val + 1);
             }
-        };
+            None => {
+                order = Some(0);
+            }
+        }
+        let order = order.unwrap();
+        println!("find_command_slot_messages order is now: {}", order);
+        let type_byte = msg[0];
+
         match type_byte {
             b'Q' => {
-                let query_data = match (Query { bytes: data }).decode() {
+                let body = msg[5..].to_vec();
+                let query_content = match (Query { bytes: body }).decode() {
                     Ok(decoded) => decoded,
                     Err(e) => return Err(Error::new(std::io::ErrorKind::Other, e.message)),
                 };
 
-                let cache_plan = match find_template_simple(&query_data.query, client_state) {
+                let cache_plan = match find_template_simple(&query_content.query, client_state) {
                     Some(cache_plan) => cache_plan,
                     None => {
-                        command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
-                            bytes: msg.to_vec(),
-                        }));
+                        command_slots.insert(
+                            order,
+                            CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
+                        );
                         continue;
                     }
                 };
-                let cache_command = match get_from_cache(client_state, &cache_plan.key) {
-                    Some(cached_response) => CommandSlot::Replay(CommandSlotReplay {
-                        data: cached_response,
-                        describe_kind: DescribeKind::None,
-                        protocol_mode: ProtocolMode::Simple,
-                        query: query_data.query,
-                        key: cache_plan.key,
-                    }),
-                    None => CommandSlot::Capture(CommandSlotCapture {
-                        key: cache_plan.key,
-                        describe_kind: DescribeKind::None,
-                        protocol_mode: ProtocolMode::Simple,
-                        query: query_data.query,
-                        ttl: cache_plan.ttl,
-                    }),
+                match get_from_cache(client_state, &cache_plan.key) {
+                    Some(cached_response) => command_slots.insert(
+                        order,
+                        CommandSlot::Replay(CommandSlotReplay {
+                            data: cached_response,
+                            describe_kind: DescribeKind::None,
+                            protocol_mode: ProtocolMode::Simple,
+                            query: query_content.query,
+                            key: cache_plan.key,
+                        }),
+                    ),
+                    None => command_slots.insert(
+                        order,
+                        CommandSlot::Capture(CommandSlotCapture {
+                            key: cache_plan.key,
+                            describe_kind: DescribeKind::None,
+                            protocol_mode: ProtocolMode::Simple,
+                            query: query_content.query,
+                            ttl: cache_plan.ttl,
+                        }),
+                    ),
                 };
+            }
+            b'P' => {
+                let body = msg[5..].to_vec();
+                let parse_content = match (Parse { bytes: body }).decode() {
+                    Ok(decoded) => decoded,
+                    Err(e) => {
+                        return Err(Error::new(std::io::ErrorKind::Other, e.message));
+                    }
+                };
+                let _ = parse_message(&parse_content, client_state);
+                parse_messages.insert(order, (msg, parse_content));
+            }
+            b'B' => {
+                let body = msg[5..].to_vec();
+                let bind_content = match (Bind { bytes: body }).decode() {
+                    Ok(decoded) => decoded,
+                    Err(e) => {
+                        return Err(Error::new(std::io::ErrorKind::Other, e.message));
+                    }
+                };
+                let _ = bind_message(&bind_content, client_state);
+                bind_messages.insert(order, (msg, bind_content));
+            }
+            b'D' => {
+                let body = msg[5..].to_vec();
+                let describe_content = match (Describe { bytes: body }).decode() {
+                    Ok(decoded) => decoded,
+                    Err(e) => {
+                        return Err(Error::new(std::io::ErrorKind::Other, e.message));
+                    }
+                };
+                // let _ = describe_message(&describe_content);
+                describe_messages.insert(order, (msg, describe_content));
+            }
+            b'E' => {
+                let body = msg[5..].to_vec();
+                let execute_content = match (Execute { bytes: body }).decode() {
+                    Ok(decoded) => decoded,
+                    Err(e) => {
+                        return Err(Error::new(std::io::ErrorKind::Other, e.message));
+                    }
+                };
+                let cache_plan = match find_template(&execute_content, client_state) {
+                    Some(cache_plan) => cache_plan,
+                    None => {
+                        command_slots.insert(
+                            order,
+                            CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
+                        );
+                        continue;
+                    }
+                };
+                let cache_response = get_from_cache(client_state, &cache_plan.key);
+                let mut describe_kind: DescribeKind = DescribeKind::None;
+                let mut paired_describe_message = None;
+                'find_describe: for (slot, (_, content)) in &describe_messages.clone() {
+                    match content.target {
+                        DescribeMessageContentTarget::Portal => {
+                            if get_portal_in_session(&content.name, client_state).is_some() {
+                                paired_describe_message = Some(content);
+                                describe_kind = describe_message(&content);
+                                describe_messages.remove(slot);
+                                break 'find_describe;
+                            }
+                        }
+                        DescribeMessageContentTarget::PreparedStatement => {
+                            if get_prepared_statement_in_session(&content.name, client_state)
+                                .is_some()
+                            {
+                                paired_describe_message = Some(content);
+                                describe_kind = describe_message(&content);
+                                describe_messages.remove(slot);
+                                break 'find_describe;
+                            }
+                        }
+                    }
+                }
+            }
+            b'S' => {
+                command_slots.insert(
+                    order,
+                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
+                );
+            }
+            b'C' => {
+                command_slots.insert(
+                    order,
+                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
+                );
+            }
+            b'X' => {
+                command_slots.insert(
+                    order,
+                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
+                );
             }
             _ => {
                 return Err(Error::new(

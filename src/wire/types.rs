@@ -67,10 +67,13 @@ impl BufferState {
     pub async fn read_from_stream(&mut self, stream: &mut OwnedReadHalf) -> Result<usize, Error> {
         let free_space = self.buffer.len() - self.write_cursor;
         if free_space < self.buffer.len() / 4 {
+            println!("Buffer close to being full, compacting");
             self.compact();
         }
         if self.write_cursor >= self.buffer.len() {
+            println!("Buffer too small, resizing");
             self.buffer.resize(self.buffer.len() * 2, 0);
+            return Box::pin(self.read_from_stream(stream)).await;
         }
         let read = stream.read(&mut self.buffer[self.write_cursor..]).await?;
         self.write_cursor += read;
