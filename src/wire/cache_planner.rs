@@ -13,7 +13,7 @@ use crate::{
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
     wire::{
         Decode, MessageFramer, data_phase,
-        types::{CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay},
+        types::{CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, Cycle},
     },
 };
 
@@ -96,28 +96,18 @@ pub(super) fn resolve_ttl(app_state: &AppState, query: &str) -> Option<Duration>
 
 pub(super) async fn find_command_slot_messages(
     client_state: &mut ClientState,
-) -> Result<BTreeMap<u32, CommandSlot>, Error> {
-    let mut command_slots: BTreeMap<u32, CommandSlot> = BTreeMap::new();
-    let mut parse_messages: BTreeMap<u32, (Vec<u8>, ParseMessageContent)> = BTreeMap::new();
-    let mut bind_messages: BTreeMap<u32, (Vec<u8>, BindMessageContent)> = BTreeMap::new();
-    let mut describe_messages: BTreeMap<u32, (Vec<u8>, DescribeMessageContent)> = BTreeMap::new();
-    let mut order: Option<u32> = None;
+) -> Result<Vec<Cycle>, Error> {
+    let mut cycles: Vec<Cycle> = Vec::new();
+    let mut command_slots: Vec<CommandSlot> = Vec::new();
+    let mut parse_messages: Vec<(Vec<u8>, ParseMessageContent)> = Vec::new();
+    let mut bind_messages: Vec<(Vec<u8>, BindMessageContent)> = Vec::new();
+    let mut describe_messages: Vec<(Vec<u8>, DescribeMessageContent)> = Vec::new();
 
     client_state
         .framer
         .add_buffer(client_state.buffer_state.pending_data());
 
     while let Ok(Some(msg)) = client_state.framer.next_message() {
-        match order {
-            Some(order_val) => {
-                order = Some(order_val + 1);
-            }
-            None => {
-                order = Some(0);
-            }
-        }
-        let order = order.unwrap();
-        println!("find_command_slot_messages order is now: {}", order);
         let type_byte = msg[0];
 
         match type_byte {
@@ -131,34 +121,29 @@ pub(super) async fn find_command_slot_messages(
                 let cache_plan = match find_template_simple(&query_content.query, client_state) {
                     Some(cache_plan) => cache_plan,
                     None => {
-                        command_slots.insert(
-                            order,
-                            CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
-                        );
+                        command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
+                            bytes: msg,
+                        }));
                         continue;
                     }
                 };
                 match get_from_cache(client_state, &cache_plan.key) {
-                    Some(cached_response) => command_slots.insert(
-                        order,
-                        CommandSlot::Replay(CommandSlotReplay {
+                    Some(cached_response) => {
+                        command_slots.push(CommandSlot::Replay(CommandSlotReplay {
                             data: cached_response,
                             describe_kind: DescribeKind::None,
                             protocol_mode: ProtocolMode::Simple,
                             query: query_content.query,
                             key: cache_plan.key,
-                        }),
-                    ),
-                    None => command_slots.insert(
-                        order,
-                        CommandSlot::Capture(CommandSlotCapture {
-                            key: cache_plan.key,
-                            describe_kind: DescribeKind::None,
-                            protocol_mode: ProtocolMode::Simple,
-                            query: query_content.query,
-                            ttl: cache_plan.ttl,
-                        }),
-                    ),
+                        }))
+                    }
+                    None => command_slots.push(CommandSlot::Capture(CommandSlotCapture {
+                        key: cache_plan.key,
+                        describe_kind: DescribeKind::None,
+                        protocol_mode: ProtocolMode::Simple,
+                        query: query_content.query,
+                        ttl: cache_plan.ttl,
+                    })),
                 };
             }
             b'P' => {
@@ -170,7 +155,7 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = parse_message(&parse_content, client_state);
-                parse_messages.insert(order, (msg, parse_content));
+                parse_messages.push((msg, parse_content));
             }
             b'B' => {
                 let body = msg[5..].to_vec();
@@ -181,7 +166,7 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = bind_message(&bind_content, client_state);
-                bind_messages.insert(order, (msg, bind_content));
+                bind_messages.push((msg, bind_content));
             }
             b'D' => {
                 let body = msg[5..].to_vec();
@@ -191,8 +176,7 @@ pub(super) async fn find_command_slot_messages(
                         return Err(Error::new(std::io::ErrorKind::Other, e.message));
                     }
                 };
-                // let _ = describe_message(&describe_content);
-                describe_messages.insert(order, (msg, describe_content));
+                describe_messages.push((msg, describe_content));
             }
             b'E' => {
                 let body = msg[5..].to_vec();
@@ -205,56 +189,113 @@ pub(super) async fn find_command_slot_messages(
                 let cache_plan = match find_template(&execute_content, client_state) {
                     Some(cache_plan) => cache_plan,
                     None => {
-                        command_slots.insert(
-                            order,
-                            CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
-                        );
+                        command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
+                            bytes: msg,
+                        }));
                         continue;
                     }
                 };
                 let cache_response = get_from_cache(client_state, &cache_plan.key);
                 let mut describe_kind: DescribeKind = DescribeKind::None;
                 let mut paired_describe_message = None;
-                'find_describe: for (slot, (_, content)) in &describe_messages.clone() {
-                    match content.target {
+                let mut paired_bind_message = None;
+                let mut paired_parse_message = None;
+                let mut paired_parse_message_query = String::new();
+                let mut describe_message_to_remove: Option<usize> = None;
+
+                'find_describe: for (describe_slot, (_, describe_content)) in
+                    describe_messages.iter().enumerate()
+                {
+                    match describe_content.target {
                         DescribeMessageContentTarget::Portal => {
-                            if get_portal_in_session(&content.name, client_state).is_some() {
-                                paired_describe_message = Some(content);
-                                describe_kind = describe_message(&content);
-                                describe_messages.remove(slot);
+                            if get_portal_in_session(&describe_content.name, client_state).is_some()
+                            {
+                                paired_describe_message = Some(describe_content);
+                                describe_kind = describe_message(&describe_content);
+                                describe_message_to_remove = Some(describe_slot);
                                 break 'find_describe;
                             }
                         }
                         DescribeMessageContentTarget::PreparedStatement => {
-                            if get_prepared_statement_in_session(&content.name, client_state)
-                                .is_some()
+                            if get_prepared_statement_in_session(
+                                &describe_content.name,
+                                client_state,
+                            )
+                            .is_some()
                             {
-                                paired_describe_message = Some(content);
-                                describe_kind = describe_message(&content);
-                                describe_messages.remove(slot);
+                                paired_describe_message = Some(describe_content);
+                                describe_kind = describe_message(&describe_content);
+                                describe_message_to_remove = Some(describe_slot);
                                 break 'find_describe;
                             }
                         }
                     }
                 }
+                if let Some(slot) = describe_message_to_remove {
+                    describe_messages.remove(slot);
+                }
+                let mut bind_message_to_remove: Option<usize> = None;
+                let mut parse_message_to_remove: Option<usize> = None;
+                'find_bind: for (bind_slot, (_, bind_content)) in bind_messages.iter().enumerate() {
+                    if &bind_content.portal_name == &execute_content.name {
+                        paired_bind_message = Some(bind_content);
+                        bind_message_to_remove = Some(bind_slot);
+                        'find_parse: for (parse_slot, (_, parse_content)) in
+                            parse_messages.iter().enumerate()
+                        {
+                            if parse_content.prepared_statement_name
+                                == bind_content.source_prepared_statement_name
+                            {
+                                paired_parse_message = Some(parse_content.clone());
+                                paired_parse_message_query = parse_content.query.clone();
+                                parse_message_to_remove = Some(parse_slot);
+                                break 'find_parse;
+                            }
+                        }
+                        break 'find_bind;
+                    }
+                }
+                if let Some(slot) = bind_message_to_remove {
+                    bind_messages.remove(slot);
+                }
+                if let Some(slot) = parse_message_to_remove {
+                    parse_messages.remove(slot);
+                }
+                match cache_response {
+                    Some(response) => command_slots.push(CommandSlot::Replay(CommandSlotReplay {
+                        key: cache_plan.key,
+                        data: response,
+                        describe_kind,
+                        protocol_mode: ProtocolMode::Extended,
+                        query: paired_parse_message_query,
+                    })),
+                    None => command_slots.push(CommandSlot::Capture(CommandSlotCapture {
+                        key: cache_plan.key,
+                        describe_kind,
+                        protocol_mode: ProtocolMode::Extended,
+                        query: paired_parse_message_query,
+                        ttl: cache_plan.ttl,
+                    })),
+                };
             }
             b'S' => {
-                command_slots.insert(
-                    order,
-                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
-                );
+                cycles.push(Cycle {
+                    slots: command_slots,
+                });
+                command_slots = Vec::new();
+                parse_messages = Vec::new();
+                bind_messages = Vec::new();
+                describe_messages = Vec::new();
             }
             b'C' => {
-                command_slots.insert(
-                    order,
-                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
-                );
+                command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
+                    bytes: msg,
+                }));
             }
             b'X' => {
-                command_slots.insert(
-                    order,
-                    CommandSlot::Passthrough(CommandSlotPassthrough { bytes: msg }),
-                );
+                command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
+                    bytes: msg,
+                }));
             }
             _ => {
                 return Err(Error::new(
@@ -264,7 +305,7 @@ pub(super) async fn find_command_slot_messages(
             }
         }
     }
-    return Ok(command_slots);
+    return Ok(cycles);
 }
 
 pub(super) async fn find_cache_related_messages(

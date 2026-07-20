@@ -162,6 +162,10 @@ pub(super) enum ProtocolMode {
 }
 
 #[derive(Clone)]
+pub(super) struct Cycle {
+    pub slots: Vec<CommandSlot>,
+}
+#[derive(Clone)]
 pub(super) enum CommandSlot {
     Passthrough(CommandSlotPassthrough), // not configured: clean passthrough to the db
     Replay(CommandSlotReplay),           // cache hit: write these to client, skip DB

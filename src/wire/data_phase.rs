@@ -4,7 +4,7 @@ use crate::{
     cache::lfu::CachedResponse,
     wire::{
         messages::DBMessageContent,
-        types::{CommandSlotCapture, DescribeKind},
+        types::{CommandSlotCapture, Cycle, DescribeKind},
     },
 };
 
@@ -22,7 +22,7 @@ use tokio::{
 pub(super) async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
-    tx: &Sender<BTreeMap<u32, CommandSlot>>,
+    tx: &Sender<Vec<Cycle>>,
 ) {
     super::stream_try_write(&db_write, client_state.buffer_state.pending_data()).await;
 
@@ -43,19 +43,11 @@ pub(super) async fn handle_client(
 }
 
 pub(super) async fn handle_db(
-    command_slots: BTreeMap<u32, CommandSlot>,
+    cycles: Vec<Cycle>,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
-    // for (slot, command) in command_slots {
-    //     match command {
-    //         CommandSlot::Passthrough(data) => {
-    //             let _ = super::stream_try_write(client_write, &data.bytes).await;
-    //         }
-    //         _ => {}
-    //     }
-    // }
     'read_loop: loop {
         let _ = db_state.buffer_state.read_from_stream(db_read).await;
         super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
@@ -90,7 +82,7 @@ pub(super) async fn handle_db_read(
 }
 
 pub(super) async fn handle_db_cache_command(
-    slot_commands: BTreeMap<u16, CommandSlot>,
+    cycles: Vec<Cycle>,
     should_hit_db: bool,
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
