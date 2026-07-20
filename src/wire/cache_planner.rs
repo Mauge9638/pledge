@@ -99,9 +99,9 @@ pub(super) async fn find_command_slot_messages(
 ) -> Result<Vec<Cycle>, Error> {
     let mut cycles: Vec<Cycle> = Vec::new();
     let mut command_slots: Vec<CommandSlot> = Vec::new();
-    let mut parse_messages: Vec<(Vec<u8>, ParseMessageContent)> = Vec::new();
-    let mut bind_messages: Vec<(Vec<u8>, BindMessageContent)> = Vec::new();
-    let mut describe_messages: Vec<(Vec<u8>, DescribeMessageContent)> = Vec::new();
+    let mut parse_messages: Vec<ParseMessageContent> = Vec::new();
+    let mut bind_messages: Vec<BindMessageContent> = Vec::new();
+    let mut describe_messages: Vec<DescribeMessageContent> = Vec::new();
 
     client_state
         .framer
@@ -121,29 +121,33 @@ pub(super) async fn find_command_slot_messages(
                 let cache_plan = match find_template_simple(&query_content.query, client_state) {
                     Some(cache_plan) => cache_plan,
                     None => {
-                        command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
-                            bytes: msg,
-                        }));
+                        cycles.push(Cycle {
+                            slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
+                                bytes: msg,
+                            })],
+                        });
                         continue;
                     }
                 };
                 match get_from_cache(client_state, &cache_plan.key) {
-                    Some(cached_response) => {
-                        command_slots.push(CommandSlot::Replay(CommandSlotReplay {
+                    Some(cached_response) => cycles.push(Cycle {
+                        slots: vec![CommandSlot::Replay(CommandSlotReplay {
                             data: cached_response,
                             describe_kind: DescribeKind::None,
                             protocol_mode: ProtocolMode::Simple,
                             query: query_content.query,
                             key: cache_plan.key,
-                        }))
-                    }
-                    None => command_slots.push(CommandSlot::Capture(CommandSlotCapture {
-                        key: cache_plan.key,
-                        describe_kind: DescribeKind::None,
-                        protocol_mode: ProtocolMode::Simple,
-                        query: query_content.query,
-                        ttl: cache_plan.ttl,
-                    })),
+                        })],
+                    }),
+                    None => cycles.push(Cycle {
+                        slots: vec![CommandSlot::Capture(CommandSlotCapture {
+                            key: cache_plan.key,
+                            describe_kind: DescribeKind::None,
+                            protocol_mode: ProtocolMode::Simple,
+                            query: query_content.query,
+                            ttl: cache_plan.ttl,
+                        })],
+                    }),
                 };
             }
             b'P' => {
@@ -155,7 +159,7 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = parse_message(&parse_content, client_state);
-                parse_messages.push((msg, parse_content));
+                parse_messages.push(parse_content);
             }
             b'B' => {
                 let body = msg[5..].to_vec();
@@ -166,7 +170,7 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = bind_message(&bind_content, client_state);
-                bind_messages.push((msg, bind_content));
+                bind_messages.push(bind_content);
             }
             b'D' => {
                 let body = msg[5..].to_vec();
@@ -176,7 +180,7 @@ pub(super) async fn find_command_slot_messages(
                         return Err(Error::new(std::io::ErrorKind::Other, e.message));
                     }
                 };
-                describe_messages.push((msg, describe_content));
+                describe_messages.push(describe_content);
             }
             b'E' => {
                 let body = msg[5..].to_vec();
@@ -197,20 +201,16 @@ pub(super) async fn find_command_slot_messages(
                 };
                 let cache_response = get_from_cache(client_state, &cache_plan.key);
                 let mut describe_kind: DescribeKind = DescribeKind::None;
-                let mut paired_describe_message = None;
-                let mut paired_bind_message = None;
-                let mut paired_parse_message = None;
                 let mut paired_parse_message_query = String::new();
                 let mut describe_message_to_remove: Option<usize> = None;
 
-                'find_describe: for (describe_slot, (_, describe_content)) in
+                'find_describe: for (describe_slot, describe_content) in
                     describe_messages.iter().enumerate()
                 {
                     match describe_content.target {
                         DescribeMessageContentTarget::Portal => {
                             if get_portal_in_session(&describe_content.name, client_state).is_some()
                             {
-                                paired_describe_message = Some(describe_content);
                                 describe_kind = describe_message(&describe_content);
                                 describe_message_to_remove = Some(describe_slot);
                                 break 'find_describe;
@@ -223,7 +223,6 @@ pub(super) async fn find_command_slot_messages(
                             )
                             .is_some()
                             {
-                                paired_describe_message = Some(describe_content);
                                 describe_kind = describe_message(&describe_content);
                                 describe_message_to_remove = Some(describe_slot);
                                 break 'find_describe;
@@ -236,17 +235,15 @@ pub(super) async fn find_command_slot_messages(
                 }
                 let mut bind_message_to_remove: Option<usize> = None;
                 let mut parse_message_to_remove: Option<usize> = None;
-                'find_bind: for (bind_slot, (_, bind_content)) in bind_messages.iter().enumerate() {
+                'find_bind: for (bind_slot, bind_content) in bind_messages.iter().enumerate() {
                     if &bind_content.portal_name == &execute_content.name {
-                        paired_bind_message = Some(bind_content);
                         bind_message_to_remove = Some(bind_slot);
-                        'find_parse: for (parse_slot, (_, parse_content)) in
+                        'find_parse: for (parse_slot, parse_content) in
                             parse_messages.iter().enumerate()
                         {
                             if parse_content.prepared_statement_name
                                 == bind_content.source_prepared_statement_name
                             {
-                                paired_parse_message = Some(parse_content.clone());
                                 paired_parse_message_query = parse_content.query.clone();
                                 parse_message_to_remove = Some(parse_slot);
                                 break 'find_parse;
