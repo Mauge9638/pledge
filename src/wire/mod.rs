@@ -13,8 +13,8 @@ use types::{SQLCommand, WireProtocolStates};
 
 use messages::Decode;
 
-use crate::config::DatabaseConfig;
 use crate::{AppState, wire::types::BufferState};
+use crate::{config::DatabaseConfig, wire::types::Scratch};
 use reader::ByteReader;
 use types::{ClientState, CommandSlot, DBState, ReplayTrim};
 
@@ -78,6 +78,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
         prepared_statements: HashMap::new(),
         portals: HashMap::new(),
         framer: MessageFramer::new(),
+        scratch: Scratch::new(),
     };
     let mut db_state = DBState {
         app_state: app_state.clone(),
@@ -87,6 +88,7 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
             read_cursor: 0,
         },
         framer: MessageFramer::new(),
+        scratch: Scratch::new(),
     };
 
     startup_phase::startup_state_handling(

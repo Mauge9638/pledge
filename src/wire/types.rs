@@ -7,7 +7,16 @@ use std::{
 };
 
 use super::MessageFramer;
-use crate::{AppState, cache::lfu::CachedResponse, wire::writer::ByteWriter};
+use crate::{
+    AppState,
+    cache::lfu::CachedResponse,
+    wire::{
+        messages::{
+            BindMessageContent, DescribeMessageContent, ExecuteMessageContent, ParseMessageContent,
+        },
+        writer::ByteWriter,
+    },
+};
 use tokio::{
     io::AsyncReadExt,
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -49,12 +58,55 @@ pub(super) struct ClientState {
     pub portals: HashMap<String, Portal>,
     pub framer: MessageFramer,
     pub buffer_state: BufferState,
+    pub scratch: Scratch,
 }
 
 pub(super) struct DBState {
     pub app_state: AppState,
     pub framer: MessageFramer,
     pub buffer_state: BufferState,
+    pub scratch: Scratch,
+}
+
+pub(super) enum ScratchKind {
+    Parse,
+    Bind,
+    Describe,
+    Execute,
+    Query,
+    Sync,
+    Close,
+    Terminate,
+}
+
+pub(super) struct ScratchEntry {
+    pub bytes: Vec<u8>,
+    pub kind: ScratchKind,
+    pub execute: Option<ExecuteMessageContent>,
+}
+
+pub(super) struct Scratch {
+    pub entries: Vec<ScratchEntry>,
+    pub parses_by_stmt_name: HashMap<String, ParseMessageContent>,
+    pub binds_by_portal_name: HashMap<String, BindMessageContent>,
+    pub describes_by_name: HashMap<String, DescribeMessageContent>,
+}
+
+impl Scratch {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            parses_by_stmt_name: HashMap::new(),
+            binds_by_portal_name: HashMap::new(),
+            describes_by_name: HashMap::new(),
+        }
+    }
+    pub fn reset(&mut self) {
+        self.entries.clear();
+        self.parses_by_stmt_name.clear();
+        self.binds_by_portal_name.clear();
+        self.describes_by_name.clear();
+    }
 }
 
 pub(super) struct BufferState {
@@ -168,12 +220,18 @@ pub(super) struct Cycle {
 #[derive(Clone)]
 pub(super) enum CommandSlot {
     Passthrough(CommandSlotPassthrough), // not configured: clean passthrough to the db
-    Replay(CommandSlotReplay),           // cache hit: write these to client, skip DB
-    Capture(CommandSlotCapture),         // cache miss: next DB response belongs to this key
+    Skip(CommandSlotSkip),
+    Replay(CommandSlotReplay), // cache hit: write these to client, skip DB
+    Capture(CommandSlotCapture), // cache miss: next DB response belongs to this key
 }
 
 #[derive(Clone)]
 pub(super) struct CommandSlotPassthrough {
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub(super) struct CommandSlotSkip {
     pub bytes: Vec<u8>,
 }
 

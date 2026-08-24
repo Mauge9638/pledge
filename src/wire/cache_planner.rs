@@ -12,7 +12,7 @@ use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
     wire::{
-        Decode, MessageFramer, data_phase,
+        Decode, MessageFramer, Scratch, data_phase,
         types::{CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, Cycle},
     },
 };
@@ -99,10 +99,6 @@ pub(super) async fn find_command_slot_messages(
 ) -> Result<Vec<Cycle>, Error> {
     let mut cycles: Vec<Cycle> = Vec::new();
     let mut command_slots: Vec<CommandSlot> = Vec::new();
-    let mut parse_messages: Vec<ParseMessageContent> = Vec::new();
-    let mut bind_messages: Vec<BindMessageContent> = Vec::new();
-    let mut describe_messages: Vec<DescribeMessageContent> = Vec::new();
-
     client_state
         .framer
         .add_buffer(client_state.buffer_state.pending_data());
@@ -159,7 +155,10 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = parse_message(&parse_content, client_state);
-                parse_messages.push(parse_content);
+                client_state
+                    .scratch
+                    .parses_by_stmt_name
+                    .insert(parse_content.prepared_statement_name.clone(), parse_content);
             }
             b'B' => {
                 let body = msg[5..].to_vec();
@@ -170,7 +169,10 @@ pub(super) async fn find_command_slot_messages(
                     }
                 };
                 let _ = bind_message(&bind_content, client_state);
-                bind_messages.push(bind_content);
+                client_state
+                    .scratch
+                    .binds_by_portal_name
+                    .insert(bind_content.portal_name.clone(), bind_content);
             }
             b'D' => {
                 let body = msg[5..].to_vec();
@@ -180,7 +182,10 @@ pub(super) async fn find_command_slot_messages(
                         return Err(Error::new(std::io::ErrorKind::Other, e.message));
                     }
                 };
-                describe_messages.push(describe_content);
+                client_state
+                    .scratch
+                    .describes_by_name
+                    .insert(describe_content.name.clone(), describe_content);
             }
             b'E' => {
                 let body = msg[5..].to_vec();
@@ -202,62 +207,20 @@ pub(super) async fn find_command_slot_messages(
                 let cache_response = get_from_cache(client_state, &cache_plan.key);
                 let mut describe_kind: DescribeKind = DescribeKind::None;
                 let mut paired_parse_message_query = String::new();
-                let mut describe_message_to_remove: Option<usize> = None;
-
-                'find_describe: for (describe_slot, describe_content) in
-                    describe_messages.iter().enumerate()
+                if let Some(paired_query) =
+                    find_paired_parse_message_query(client_state, &execute_content.name)
                 {
-                    match describe_content.target {
-                        DescribeMessageContentTarget::Portal => {
-                            if get_portal_in_session(&describe_content.name, client_state).is_some()
-                            {
-                                describe_kind = describe_message(&describe_content);
-                                describe_message_to_remove = Some(describe_slot);
-                                break 'find_describe;
-                            }
-                        }
-                        DescribeMessageContentTarget::PreparedStatement => {
-                            if get_prepared_statement_in_session(
-                                &describe_content.name,
-                                client_state,
-                            )
-                            .is_some()
-                            {
-                                describe_kind = describe_message(&describe_content);
-                                describe_message_to_remove = Some(describe_slot);
-                                break 'find_describe;
-                            }
-                        }
-                    }
+                    paired_parse_message_query = paired_query
                 }
-                if let Some(slot) = describe_message_to_remove {
-                    describe_messages.remove(slot);
+
+                if let Some(matched_describe) = client_state
+                    .scratch
+                    .describes_by_name
+                    .get(&execute_content.name)
+                {
+                    describe_kind = describe_message(matched_describe);
                 }
-                let mut bind_message_to_remove: Option<usize> = None;
-                let mut parse_message_to_remove: Option<usize> = None;
-                'find_bind: for (bind_slot, bind_content) in bind_messages.iter().enumerate() {
-                    if &bind_content.portal_name == &execute_content.name {
-                        bind_message_to_remove = Some(bind_slot);
-                        'find_parse: for (parse_slot, parse_content) in
-                            parse_messages.iter().enumerate()
-                        {
-                            if parse_content.prepared_statement_name
-                                == bind_content.source_prepared_statement_name
-                            {
-                                paired_parse_message_query = parse_content.query.clone();
-                                parse_message_to_remove = Some(parse_slot);
-                                break 'find_parse;
-                            }
-                        }
-                        break 'find_bind;
-                    }
-                }
-                if let Some(slot) = bind_message_to_remove {
-                    bind_messages.remove(slot);
-                }
-                if let Some(slot) = parse_message_to_remove {
-                    parse_messages.remove(slot);
-                }
+
                 match cache_response {
                     Some(response) => command_slots.push(CommandSlot::Replay(CommandSlotReplay {
                         key: cache_plan.key,
@@ -280,9 +243,7 @@ pub(super) async fn find_command_slot_messages(
                     slots: command_slots,
                 });
                 command_slots = Vec::new();
-                parse_messages = Vec::new();
-                bind_messages = Vec::new();
-                describe_messages = Vec::new();
+                client_state.scratch.reset();
             }
             b'C' => {
                 command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
@@ -589,4 +550,46 @@ fn cache_data_can_satisfy(response: &CachedResponse, kind: &DescribeKind) -> boo
             response.has_data() && response.has_row_desc() && response.has_param_desc()
         }
     }
+}
+
+fn find_paired_parse_message_query(
+    client_state: &mut ClientState,
+    execute_content_name: &str,
+) -> Option<String> {
+    if let Some(source_prepared_stmt_name) =
+        find_source_prepared_stmt_name(client_state, execute_content_name)
+    {
+        if let Some(paired_parse_message_query) = client_state
+            .scratch
+            .parses_by_stmt_name
+            .get(&source_prepared_stmt_name)
+        {
+            return Some(paired_parse_message_query.query.clone());
+        }
+        if let Some(prepared_statement) = client_state
+            .prepared_statements
+            .get(&source_prepared_stmt_name)
+        {
+            return Some(prepared_statement.query.clone());
+        }
+    }
+    return None;
+}
+
+fn find_source_prepared_stmt_name(
+    client_state: &mut ClientState,
+    execute_content_name: &str,
+) -> Option<String> {
+    if let Some(matched_bind_message) = client_state
+        .scratch
+        .binds_by_portal_name
+        .get(execute_content_name)
+    {
+        return Some(matched_bind_message.source_prepared_statement_name.clone());
+    }
+    if let Some(matched_portal) = client_state.portals.get(execute_content_name) {
+        return Some(matched_portal.source_prepared_statement_name.clone());
+    }
+
+    return None;
 }
