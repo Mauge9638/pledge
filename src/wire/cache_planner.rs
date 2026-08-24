@@ -211,11 +211,6 @@ pub(super) async fn find_command_slot_messages(
                     .insert(describe_content.name.clone(), describe_content);
             }
             b'E' => {
-                client_state.scratch.entries.push(ScratchEntry {
-                    bytes: msg.clone(),
-                    kind: ScratchKind::Execute,
-                    execute: None,
-                });
                 let body = msg[5..].to_vec();
                 let execute_content = match (Execute { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -223,6 +218,11 @@ pub(super) async fn find_command_slot_messages(
                         return Err(Error::new(std::io::ErrorKind::Other, e.message));
                     }
                 };
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Execute,
+                    execute: Some(execute_content.clone()),
+                });
                 let cache_plan = match find_template(&execute_content, client_state) {
                     Some(cache_plan) => cache_plan,
                     None => {
