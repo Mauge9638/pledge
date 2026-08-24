@@ -13,7 +13,10 @@ use crate::{
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
     wire::{
         Decode, MessageFramer, Scratch, data_phase,
-        types::{CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, Cycle},
+        types::{
+            CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, Cycle,
+            ScratchEntry, ScratchKind,
+        },
     },
 };
 
@@ -108,6 +111,11 @@ pub(super) async fn find_command_slot_messages(
 
         match type_byte {
             b'Q' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Query,
+                    execute: None,
+                });
                 let body = msg[5..].to_vec();
                 let query_content = match (Query { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -147,6 +155,11 @@ pub(super) async fn find_command_slot_messages(
                 };
             }
             b'P' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Parse,
+                    execute: None,
+                });
                 let body = msg[5..].to_vec();
                 let parse_content = match (Parse { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -161,6 +174,11 @@ pub(super) async fn find_command_slot_messages(
                     .insert(parse_content.prepared_statement_name.clone(), parse_content);
             }
             b'B' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Bind,
+                    execute: None,
+                });
                 let body = msg[5..].to_vec();
                 let bind_content = match (Bind { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -175,6 +193,11 @@ pub(super) async fn find_command_slot_messages(
                     .insert(bind_content.portal_name.clone(), bind_content);
             }
             b'D' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Describe,
+                    execute: None,
+                });
                 let body = msg[5..].to_vec();
                 let describe_content = match (Describe { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -188,6 +211,11 @@ pub(super) async fn find_command_slot_messages(
                     .insert(describe_content.name.clone(), describe_content);
             }
             b'E' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Execute,
+                    execute: None,
+                });
                 let body = msg[5..].to_vec();
                 let execute_content = match (Execute { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -239,6 +267,11 @@ pub(super) async fn find_command_slot_messages(
                 };
             }
             b'S' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Sync,
+                    execute: None,
+                });
                 cycles.push(Cycle {
                     slots: command_slots,
                 });
@@ -246,11 +279,21 @@ pub(super) async fn find_command_slot_messages(
                 client_state.scratch.reset();
             }
             b'C' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Close,
+                    execute: None,
+                });
                 command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
                     bytes: msg,
                 }));
             }
             b'X' => {
+                client_state.scratch.entries.push(ScratchEntry {
+                    bytes: msg.clone(),
+                    kind: ScratchKind::Terminate,
+                    execute: None,
+                });
                 command_slots.push(CommandSlot::Passthrough(CommandSlotPassthrough {
                     bytes: msg,
                 }));
