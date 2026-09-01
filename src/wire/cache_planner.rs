@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::Error,
     ops::Range,
     sync::Arc,
@@ -111,11 +111,8 @@ pub(super) async fn find_command_slot_messages(
 
         match type_byte {
             b'Q' => {
-                client_state.scratch.entries.push(ScratchEntry {
-                    bytes: msg.clone(),
-                    kind: ScratchKind::Query,
-                    execute: None,
-                });
+                // From the docs: "(Note that a simple Query message also destroys the unnamed statement.)"
+                client_state.prepared_statements.remove("");
                 let body = msg[5..].to_vec();
                 let query_content = match (Query { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -267,6 +264,88 @@ pub(super) async fn find_command_slot_messages(
                 };
             }
             b'S' => {
+                let mut executes: HashMap<String, ScratchEntry> = HashMap::new();
+
+                for (index, entry) in client_state.scratch.entries.iter().enumerate() {
+                    if let ScratchKind::Execute = entry.kind {
+                        executes.insert(index.to_string(), entry.clone());
+                    }
+                }
+                match executes.len() {
+                    0 => {
+                        for entry in &mut client_state.scratch.entries {
+                            command_slots.push(CommandSlot::Passthrough({
+                                CommandSlotPassthrough {
+                                    bytes: entry.bytes.clone(),
+                                }
+                            }));
+                        }
+                    }
+                    1 => {
+                        let entry = executes.into_values().next().expect(&format!("Error: '{}'",
+                            "This should be impossible! executes.len() == 1 but into_values() yielded None"
+                        ));
+                        match entry.execute {
+                            Some(execute_content) => {
+                                let mut describe_kind = DescribeKind::None;
+                                let mut paired_parse_message_query = String::new();
+                                if let Some(paired_query) = find_paired_parse_message_query(
+                                    client_state,
+                                    &execute_content.name,
+                                ) {
+                                    paired_parse_message_query = paired_query;
+                                };
+                                if let Some(matched_describe) = client_state
+                                    .scratch
+                                    .describes_by_name
+                                    .get(&execute_content.name)
+                                {
+                                    describe_kind = describe_message(matched_describe);
+                                }
+                                // TODO
+                                match find_template(&execute_content, client_state) {
+                                    Some(cache_plan) => {
+                                        match get_from_cache(client_state, &cache_plan.key) {
+                                            Some(cache_response) => command_slots.push(
+                                                CommandSlot::Replay(CommandSlotReplay {
+                                                    key: cache_plan.key,
+                                                    data: cache_response,
+                                                    describe_kind,
+                                                    protocol_mode: ProtocolMode::Extended,
+                                                    query: paired_parse_message_query,
+                                                }),
+                                            ),
+                                            None => command_slots.push(CommandSlot::Capture(
+                                                CommandSlotCapture {
+                                                    key: cache_plan.key,
+                                                    describe_kind,
+                                                    protocol_mode: ProtocolMode::Extended,
+                                                    query: paired_parse_message_query,
+                                                    ttl: cache_plan.ttl,
+                                                },
+                                            )),
+                                        }
+                                    }
+                                    None => command_slots.push(CommandSlot::Passthrough(
+                                        CommandSlotPassthrough { bytes: entry.bytes },
+                                    )),
+                                };
+                            }
+                            None => {
+                                return Err(Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "While handling singular execute for cycle in cache_planner",
+                                ));
+                            }
+                        }
+                    }
+                    2.. => {
+                        for execute in executes {
+                            todo!("handle cases where there's multiple executes");
+                        }
+                    }
+                };
+
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
                     kind: ScratchKind::Sync,
@@ -517,10 +596,22 @@ pub(super) async fn find_cache_related_messages(
     return (cache_commands, replay_trims, should_hit_db);
 }
 
+/// Named prepared statements must be explicitly closed before they can be redefined by another Parse message,
+/// but this is not required for the unnamed statement.
 async fn parse_message(
     content: &ParseMessageContent,
     client_state: &mut ClientState,
 ) -> Result<(), StateHandlingResult> {
+    if !content.prepared_statement_name.is_empty()
+        && client_state
+            .prepared_statements
+            .contains_key(&content.prepared_statement_name)
+    {
+        return Err(StateHandlingResult::Error(
+            "prepared statement already exists".to_string(),
+        ));
+    }
+    // Maybe just save all parse messages instead of just the cache configured ones?
     if client_state
         .app_state
         .matcher
@@ -534,7 +625,7 @@ async fn parse_message(
             .prepared_statements
             .insert(content.prepared_statement_name.clone(), prepared_statement);
 
-        println!("saved in prepared statement");
+        println!("saved prepared statement");
     }
     Ok(())
 }

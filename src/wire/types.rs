@@ -68,6 +68,7 @@ pub(super) struct DBState {
     pub scratch: Scratch,
 }
 
+#[derive(Clone)]
 pub(super) enum ScratchKind {
     Parse,
     Bind,
@@ -79,6 +80,7 @@ pub(super) enum ScratchKind {
     Terminate,
 }
 
+#[derive(Clone)]
 pub(super) struct ScratchEntry {
     pub bytes: Vec<u8>,
     pub kind: ScratchKind,
